@@ -9,7 +9,7 @@ sio = socketio.AsyncServer(cors_allowed_origins="*")  # Enable CORS for testing
 app = web.Application()  # Create the web application
 sio.attach(app)  # Attach Socket.IO to the web app
 
-clients = []  # Track connected clients
+clients = []  # Tracks connected clients
 sid_to_user = {}
 user_to_sid = {}
 global_chat_event = "globalmsg"
