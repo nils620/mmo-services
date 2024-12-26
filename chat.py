@@ -2,6 +2,8 @@ import socketio
 import asyncio
 from aiohttp import web
 
+#SocketIO ChatService for the Server
+
 # Create an Async Socket.IO server
 sio = socketio.AsyncServer(cors_allowed_origins="*")  # Enable CORS for testing
 app = web.Application()  # Create the web application
