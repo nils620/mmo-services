@@ -14,6 +14,7 @@ game_servers = {}
 async def register_server(sid, data):
     """Register a game server with the master server."""
     server_name = data.get("server_name")
+    display_name = data.get("display_name")
     ip = data.get("ip")
     port = data.get("port")
     level = data.get("mapname")
@@ -22,6 +23,7 @@ async def register_server(sid, data):
 
     # Store the server's information
     game_servers[sid] = {
+        "display_name": display_name,
         "server_name": server_name,
         "ip": ip,
         "port": port,
@@ -48,31 +50,26 @@ async def update_server(sid, data):
     else:
         print(f"Server {server_id} not found!")
 
-# Handle server health checks
-@sio.event
-async def health_check(sid):
-    """Receive a health check from the game server."""
-    if sid in [info["sid"] for info in game_servers.values()]:
-        print(f"Health check received from SID {sid}")
-    else:
-        print(f"Unregistered server with SID {sid} sent a health check!")
+
 
 # Handle client requests for available servers
 @sio.event
-async def get_servers(sid):
+async def get_servers(sid, data):
     """Send a list of available servers to the client."""
     available_servers = [
         {
-            "server_id": server_id,
+            "server_name": server_name,
+            "display_name": info["display_name"],
             "ip": info["ip"],
             "port": info["port"],
+            "level": info["level"],
             "current_players": info["current_players"],
             "max_players": info["max_players"],
         }
-        for server_id, info in game_servers.items()
-        if info["current_players"] < info["max_players"]  # Only return servers with available slots
+        for server_name, info in game_servers.items()
+        #if info["current_players"] < info["max_players"]  # Only return servers with available slots
     ]
-    await sio.emit("available_servers", {"servers": available_servers}, room=sid)
+    await sio.emit("server_list", {"servers": available_servers}, room=sid)
 
 # Handle game server disconnection
 @sio.event
@@ -86,4 +83,6 @@ async def disconnect(sid):
 
 # Start the server
 if __name__ == '__main__':
-    web.run_app(app, port=4000)  # Master server runs on port 4000
+    web.run_app(app, host='0.0.0.0', port=3000)
+    #web.run_app(app, port=3000)
+
