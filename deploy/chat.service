@@ -1,0 +1,19 @@
+[Unit]
+Description=Chat Service (Socket.IO)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+# adjust if your repo lives elsewhere
+WorkingDirectory=/root/mmo-services
+# optional: load env vars if you use a .env file (don't commit secrets)
+EnvironmentFile=/root/mmo-services/.env
+ExecStart=/usr/bin/python3 /root/mmo-services/chat-server.py
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
