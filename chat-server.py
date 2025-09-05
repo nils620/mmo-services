@@ -126,7 +126,10 @@ async def privatemsg(sid, msg):
         await sio.emit(private_chat_event, json_error_msg, room=sid)
         print(f"Private message failed: {error_message}")
 
+async def health(request):
+    return web.Response(text="ok")  # HTTP 200
 
+app.router.add_get("/health", health)
 
 # Start the server
 if __name__ == '__main__':
