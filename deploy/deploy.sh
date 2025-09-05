@@ -17,6 +17,8 @@ apt-get install -y python3 python3-pip
 # or plain system Python:
 pip3 install -r "${REPO_DIR}/redistrb.txt" || true
 
+# make executable
+chmod +x deploy/deploy.sh
 # install the systemd unit
 cp "${UNIT_SRC}" "${UNIT_DST}"
 systemctl daemon-reload
