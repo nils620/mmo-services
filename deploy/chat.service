@@ -7,7 +7,7 @@ After=network-online.target
 # adjust if your repo lives elsewhere
 WorkingDirectory=/root/mmo-services
 # optional: load env vars if you use a .env file (don't commit secrets)
-EnvironmentFile=/root/mmo-services/.env
+# EnvironmentFile=/root/mmo-services/.env
 ExecStart=/usr/bin/python3 /root/mmo-services/chat-server.py
 Restart=always
 RestartSec=3
