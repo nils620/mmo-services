@@ -14,10 +14,10 @@ apt-get install -y python3 python3-pip
 
 # (optional) virtualenv
 python3 -m venv "${REPO_DIR}/venv"
-"${REPO_DIR}/venv/bin/pip" install -r "${REPO_DIR}/requirements.txt"
+"${REPO_DIR}/venv/bin/pip" install -r "${REPO_DIR}/redistrb.txt"
 
 # or plain system Python:
-pip3 install -r "${REPO_DIR}/redistrb.txt" || true
+# pip3 install -r "${REPO_DIR}/redistrb.txt" || true
 
 # install the systemd unit
 cp "${UNIT_SRC}" "${UNIT_DST}"
@@ -25,6 +25,8 @@ cp "$UNIT_SRC_PROFILES" "$UNIT_DST_PROFILES"
 
 systemctl daemon-reload
 systemctl enable --now chat
-systemctl status chat --no-pager || true
 systemctl enable --now profiles
-systemctl status profiles
+systemctl restart --now chat
+systemctl restart --now profiles
+systemctl status chat --no-pager || true
+systemctl status profiles --no-pager || true
