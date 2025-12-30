@@ -5,7 +5,7 @@ After=network.target
 [Service]
 WorkingDirectory=/root/mmo-services
 EnvironmentFile=/etc/potential/profiles.env
-ExecStart=/root/mmo-services/venv/bin/uvicorn profiles-server:app --host 0.0.0.0 --port 8000
+ExecStart=/root/mmo-services/venv/bin/uvicorn profiles_server:app --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=2
 
