@@ -17,7 +17,7 @@ python3 -m venv "${REPO_DIR}/venv"
 "${REPO_DIR}/venv/bin/pip" install -r "${REPO_DIR}/requirements.txt"
 
 # or plain system Python:
-pip3 install -r "${REPO_DIR}/redistrb.txt"
+pip3 install -r "${REPO_DIR}/redistrb.txt" || true
 
 # install the systemd unit
 cp "${UNIT_SRC}" "${UNIT_DST}"
