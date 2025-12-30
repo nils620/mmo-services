@@ -23,7 +23,7 @@ register_event = "register"
 
 # Serve a simple HTML page for web clients
 async def index(request):
-    return web.Response(text="<h1>Welcome to the Python Socket.IO Server</h1>", content_type="text/html")
+    return web.Response(text="<h1>Nothing to see here...</h1>", content_type="text/html")
 
 app.router.add_get('/', index)  # Route '/' to the index handler
 
@@ -126,13 +126,15 @@ async def privatemsg(sid, msg):
         await sio.emit(private_chat_event, json_error_msg, room=sid)
         print(f"Private message failed: {error_message}")
 
+
+# Return Health Checks from Load Balancer
 async def health(request):
     return web.Response(text="ok")  # HTTP 200
-
 app.router.add_get("/health", health)
+
+
 
 # Start the server
 if __name__ == '__main__':
     web.run_app(app, host='0.0.0.0', port=4000)
-    #web.run_app(app, port=4000)
 
