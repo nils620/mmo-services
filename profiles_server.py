@@ -150,8 +150,8 @@ def delete_character(character_id: str, player_id: str):
     return {"ok": True, "character_id": character_id}
 
 
-@app.patch("/characters/{character_id}/customization")
-def update_character_customization(character_id: str, req: UpdateCustomizationRequest):
+@app.put("/characters/{character_id}/customization")
+def update_character_customization_put(character_id: str, req: UpdateCustomizationRequest):
     customization_id = (req.customization_id or "").strip()
     if not customization_id:
         raise HTTPException(status_code=400, detail="customization_id is empty")
