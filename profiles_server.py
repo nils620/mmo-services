@@ -21,6 +21,7 @@ class LoginRequest(BaseModel):
 class CreateCharacterRequest(BaseModel):
     player_id: str
     character_name: str
+    customization_id: str
 
 
 def db():
@@ -55,14 +56,21 @@ def auth_login(req: LoginRequest):
 @app.post("/characters")
 def create_character(req: CreateCharacterRequest):
     name = req.character_name.strip()
+    customization_id = (req.customization_id or "").strip()
+
     if not name:
         raise HTTPException(status_code=400, detail="Character name is empty")
     if len(name) > 24:
         raise HTTPException(status_code=400, detail="Character name too long (max 24)")
 
+    # optional sanity checks (safe + helpful)
+    if not customization_id:
+        raise HTTPException(status_code=400, detail="customization_id is empty")
+    if len(customization_id) > 64:
+        raise HTTPException(status_code=400, detail="customization_id too long (max 64)")
+
     with db() as conn:
         with conn.cursor() as cur:
-            # Ensure player exists
             cur.execute("SELECT 1 FROM players WHERE id = %s;", (req.player_id,))
             if cur.fetchone() is None:
                 raise HTTPException(status_code=404, detail="Player not found")
@@ -70,18 +78,22 @@ def create_character(req: CreateCharacterRequest):
             try:
                 cur.execute(
                     """
-                    INSERT INTO characters (player_id, character_name)
-                    VALUES (%s, %s)
-                    RETURNING id, character_name;
+                    INSERT INTO characters (player_id, character_name, customization_id)
+                    VALUES (%s, %s, %s)
+                    RETURNING id, character_name, customization_id;
                     """,
-                    (req.player_id, name),
+                    (req.player_id, name, customization_id),
                 )
             except psycopg.errors.UniqueViolation:
                 raise HTTPException(status_code=409, detail="Character name already used by this player")
 
-            character_id, character_name = cur.fetchone()
+            character_id, character_name, customization_id = cur.fetchone()
 
-    return {"character_id": str(character_id), "character_name": character_name}
+    return {
+        "character_id": str(character_id),
+        "character_name": character_name,
+        "customization_id": customization_id,
+    }
 
 
 @app.get("/characters")
@@ -90,7 +102,7 @@ def list_characters(player_id: str):
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, character_name, created_at
+                SELECT id, character_name, customization_id, created_at
                 FROM characters
                 WHERE player_id = %s
                 ORDER BY created_at ASC;
@@ -102,7 +114,12 @@ def list_characters(player_id: str):
     return {
         "player_id": player_id,
         "characters": [
-            {"character_id": str(r[0]), "character_name": r[1], "created_at": r[2].isoformat()}
+            {
+                "character_id": str(r[0]),
+                "character_name": r[1],
+                "customization_id": (r[2] or ""),  # allow fallback
+                "created_at": r[3].isoformat(),
+            }
             for r in rows
         ],
     }
