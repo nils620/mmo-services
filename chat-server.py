@@ -12,9 +12,9 @@ sio.attach(app)  # Attach Socket.IO to the web app
 clients = []  # Tracks connected clients
 user_rooms = {}
 
+sid_to_identity = {}  # sid -> {player_id, character_id, character_name}
+character_to_sid = {}  # character_id -> sid
 
-sid_to_user = {}
-user_to_sid = {}
 global_chat_event = "globalmsg"
 private_chat_event = "privatemsg"
 local_chat_event = "localmsg"
@@ -26,6 +26,15 @@ async def index(request):
     return web.Response(text="<h1>Nothing to see here...</h1>", content_type="text/html")
 
 app.router.add_get('/', index)  # Route '/' to the index handler
+
+
+def make_sender_payload(sid):
+    identity = sid_to_identity.get(sid, {})
+    return {
+        "player_id": identity.get("player_id", ""),
+        "character_id": identity.get("character_id", ""),
+        "character_name": identity.get("character_name", "Unknown"),
+    }
 
 
 # Handle client connection
@@ -41,24 +50,60 @@ async def connect(sid, environ):
 # Handle client disconnection
 @sio.event
 async def disconnect(sid):
-    clients.remove(sid)
-    username = "Unknown User"
-    if sid in sid_to_user:
-        username = sid_to_user.pop(sid)
-        user_to_sid.pop(username, None)
-    client_disconnected_msg = f"{username} disconnected, total: {len(clients)}"
-    json_msg = {"users": len(clients)}
+    if sid in clients:
+        clients.remove(sid)
 
-    await sio.emit(server_chat_event, json_msg)  # Broadcast to all clients
-    print(client_disconnected_msg)
+    identity = sid_to_identity.pop(sid, None)
+    if identity:
+        character_to_sid.pop(identity.get("character_id"), None)
+        who = identity.get("character_name", "Unknown")
+    else:
+        who = "Unknown"
+
+    json_msg = {"users": len(clients)}
+    await sio.emit(server_chat_event, json_msg)
+    print(f"{who} disconnected, total: {len(clients)}")
 
 
 @sio.event
 async def register(sid, data):
-    username = data.get("user")
-    sid_to_user[sid] = username
-    user_to_sid[username] = sid
-    print(f"Registered: {username} with SID: {sid}")
+    # Required payload:
+    # {
+    #   "player_id": "...",
+    #   "character_id": "...",
+    #   "character_name": "..."
+    # }
+    player_id = (data.get("player_id") or "").strip()
+    character_id = (data.get("character_id") or "").strip()
+    character_name = (data.get("character_name") or "").strip()
+
+    if not player_id or not character_id or not character_name:
+        await sio.emit(
+            server_chat_event,
+            {"error": "register missing player_id/character_id/character_name"},
+            room=sid,
+        )
+        print(f"Register failed for SID {sid}: {data}")
+        return
+
+    # Optional: prevent two sockets claiming same character_id
+    old_sid = character_to_sid.get(character_id)
+    if old_sid and old_sid != sid:
+        # kick old session mapping (optional)
+        try:
+            await sio.disconnect(old_sid)
+        except Exception:
+            pass
+
+    identity = {
+        "player_id": player_id,
+        "character_id": character_id,
+        "character_name": character_name,
+    }
+    sid_to_identity[sid] = identity
+    character_to_sid[character_id] = sid
+
+    print(f"Registered: {character_name} | char_id={character_id} | player_id={player_id} | SID={sid}")
 
 
 @sio.event
@@ -66,8 +111,9 @@ async def enter_local(sid, msg):
     room = msg.get("room")
     await sio.enter_room(sid, room)
     user_rooms[sid] = room
-    username = sid_to_user[sid]
-    print(f"{username} joined room {room} users in room: {len(user_rooms)}")
+    identity = sid_to_identity.get(sid, {})
+    name = identity.get("character_name", "Unknown")
+    print(f"{name} joined room {room} users in room: {len(user_rooms)}")
     #await sio.emit("enter_local", {"room": room, "sid": sid}, room=room)
 
 
@@ -84,47 +130,50 @@ async def leave_local(sid, msg):
 # Handle messages
 @sio.event
 async def globalmsg(sid, msg):
-    sender = sid_to_user.get(sid)
     message = msg.get("msg")
-    json_msg = {"from": sender, "msg": message}
-    await sio.emit(global_chat_event, json_msg)  # Broadcast to all clients
-    print(f"Global/{sender}: {message}")
+    sender = make_sender_payload(sid)
+    json_msg = {**sender, "msg": message}
+    await sio.emit(global_chat_event, json_msg)
+    print(f"Global/{sender['character_name']}: {message}")
 
 @sio.event
 async def localmsg(sid, msg):
-    sender = sid_to_user.get(sid)
     message = msg.get("msg")
-    json_msg = {"from": sender, "msg": message}
+    sender = make_sender_payload(sid)
+    json_msg = {**sender, "msg": message}
+
     if sid in user_rooms:
         room = user_rooms[sid]
-        print(f"Local/{room}/{sender}: {message}")
+        print(f"Local/{room}/{sender['character_name']}: {message}")
         await sio.emit(local_chat_event, json_msg, room=room)
-        #Debug Room members
-        #members = sio.manager.rooms.get('/', {}).get(room, [])
-        #print(f"Room '{room}' members: {members}")
     else:
         print(f"User {sid} is not in any room. Message ignored.")
 
 
 @sio.event
 async def privatemsg(sid, msg):
-    sender = sid_to_user.get(sid)
-    receiver = msg.get("to")
+    sender = make_sender_payload(sid)
+    to_character_id = (msg.get("to_character_id") or "").strip()
     message = msg.get("msg")
-    receiver_sid = user_to_sid.get(receiver)
-    json_msg = {"from":sender, "msg": message}
 
-    if receiver_sid in sio.manager.rooms["/"]:
-        # Send the message only to the specified client
-        await sio.emit(private_chat_event, json_msg, room=receiver_sid)  # Broadcast to receiver
-        print(f"Private/{sender} to {receiver}: {message}")
+    receiver_sid = character_to_sid.get(to_character_id)
+
+    json_msg = {
+        **sender,
+        "to_character_id": to_character_id,
+        "msg": message,
+    }
+
+    if receiver_sid and receiver_sid in sio.manager.rooms.get("/", {}):
+        await sio.emit(private_chat_event, json_msg, room=receiver_sid)
+        print(f"Private/{sender['character_name']} -> {to_character_id}: {message}")
     else:
-        # Notify sender that the recipient is not online
-        error_message = f"{receiver} is not online."
-        json_error_msg = {"from": sender, "msg": error_message}
-
-        await sio.emit(private_chat_event, json_error_msg, room=sid)
-        print(f"Private message failed: {error_message}")
+        await sio.emit(
+            private_chat_event,
+            {**json_msg, "error": "recipient_not_online"},
+            room=sid
+        )
+        print(f"Private message failed: {to_character_id} is not online.")
 
 
 # Return Health Checks from Load Balancer
