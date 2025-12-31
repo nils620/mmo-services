@@ -123,3 +123,24 @@ def list_characters(player_id: str):
             for r in rows
         ],
     }
+
+@app.delete("/characters/{character_id}")
+def delete_character(character_id: str, player_id: str):
+    with db() as conn:
+        with conn.cursor() as cur:
+            # Only delete if this character belongs to this player
+            cur.execute(
+                """
+                DELETE FROM characters
+                WHERE id = %s AND player_id = %s
+                RETURNING id;
+                """,
+                (character_id, player_id),
+            )
+            deleted = cur.fetchone()
+
+    if deleted is None:
+        # either doesn't exist or not owned by that player
+        raise HTTPException(status_code=404, detail="Character not found for this player")
+
+    return {"ok": True, "character_id": character_id}
