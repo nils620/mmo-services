@@ -23,6 +23,9 @@ class CreateCharacterRequest(BaseModel):
     character_name: str
     customization_id: str
 
+class UpdateCustomizationRequest(BaseModel):
+    player_id: str
+    customization_id: str
 
 def db():
     return psycopg.connect(DB_DSN)
@@ -124,6 +127,7 @@ def list_characters(player_id: str):
         ],
     }
 
+
 @app.delete("/characters/{character_id}")
 def delete_character(character_id: str, player_id: str):
     with db() as conn:
@@ -144,3 +148,30 @@ def delete_character(character_id: str, player_id: str):
         raise HTTPException(status_code=404, detail="Character not found for this player")
 
     return {"ok": True, "character_id": character_id}
+
+
+@app.patch("/characters/{character_id}/customization")
+def update_character_customization(character_id: str, req: UpdateCustomizationRequest):
+    customization_id = (req.customization_id or "").strip()
+    if not customization_id:
+        raise HTTPException(status_code=400, detail="customization_id is empty")
+    if len(customization_id) > 64:
+        raise HTTPException(status_code=400, detail="customization_id too long (max 64)")
+
+    with db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE characters
+                SET customization_id = %s
+                WHERE id = %s AND player_id = %s
+                RETURNING id, customization_id;
+                """,
+                (customization_id, character_id, req.player_id),
+            )
+            row = cur.fetchone()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Character not found for this player")
+
+    return {"ok": True, "character_id": str(row[0]), "customization_id": row[1]}
