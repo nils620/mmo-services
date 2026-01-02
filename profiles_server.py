@@ -2,7 +2,7 @@ import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import psycopg
-from typing import Optional
+from typing import Optional, List, Literal
 
 
 # Read from environment (systemd will provide these)
@@ -60,6 +60,8 @@ def db():
 def health():
     return {"ok": True}
 
+
+# Server Login + Character Creation & Manipulation
 
 @app.post("/auth/login")
 def auth_login(req: LoginRequest):
@@ -203,6 +205,8 @@ def update_character_customization_put(character_id: str, req: UpdateCustomizati
 
 
 
+# Profile Fetch & Update
+
 @app.get("/profiles/{character_id}")
 def get_profile(character_id: str):
     with db() as conn:
@@ -338,4 +342,341 @@ def update_profile(req: UpdateProfileRequest):
         "text_color": {"r": row[6], "g": row[7], "b": row[8], "a": row[9]},
         "background_color": {"r": row[10], "g": row[11], "b": row[12], "a": row[13]},
         "updated_at": row[14].isoformat(),
+    }
+
+
+
+# Social Requests aka Friends & Friend Requests aswell as blocks
+
+class SocialActionRequest(BaseModel):
+    player_id: str
+    character_id: str          # the actor (must belong to player)
+    target_character_id: str   # who we act on
+
+
+def _assert_character_owned(cur, character_id: str, player_id: str):
+    cur.execute(
+        "SELECT 1 FROM characters WHERE id=%s AND player_id=%s;",
+        (character_id, player_id),
+    )
+    if cur.fetchone() is None:
+        raise HTTPException(status_code=403, detail="Character not owned by player")
+
+def _assert_not_self(a: str, b: str):
+    if a == b:
+        raise HTTPException(status_code=400, detail="Cannot target self")
+
+def _is_blocked_either_way(cur, a: str, b: str) -> tuple[bool, bool]:
+    # returns (a_blocked_b, b_blocked_a)
+    cur.execute(
+        """
+        SELECT
+          EXISTS(SELECT 1 FROM character_blocks WHERE blocker_character_id=%s AND blocked_character_id=%s) AS a_blocks_b,
+          EXISTS(SELECT 1 FROM character_blocks WHERE blocker_character_id=%s AND blocked_character_id=%s) AS b_blocks_a
+        """,
+        (a, b, b, a),
+    )
+    row = cur.fetchone()
+    return bool(row[0]), bool(row[1])
+
+def _friends_key(a: str, b: str) -> tuple[str, str]:
+    return (a, b) if a < b else (b, a)
+
+@app.post("/friends/request")
+def send_friend_request(req: SocialActionRequest):
+    a = req.character_id
+    b = req.target_character_id
+    _assert_not_self(a, b)
+
+    with db() as conn:
+        with conn.cursor() as cur:
+            _assert_character_owned(cur, a, req.player_id)
+
+            a_blocks_b, b_blocks_a = _is_blocked_either_way(cur, a, b)
+            if b_blocks_a:
+                raise HTTPException(status_code=403, detail="You are blocked by this character")
+            if a_blocks_b:
+                raise HTTPException(status_code=409, detail="Unblock this character first")
+
+            # already friends?
+            ka, kb = _friends_key(a, b)
+            cur.execute(
+                "SELECT 1 FROM character_friends WHERE a_character_id=%s AND b_character_id=%s;",
+                (ka, kb),
+            )
+            if cur.fetchone() is not None:
+                raise HTTPException(status_code=409, detail="Already friends")
+
+            # reverse request exists? auto-accept
+            cur.execute(
+                "SELECT 1 FROM character_friend_requests WHERE from_character_id=%s AND to_character_id=%s;",
+                (b, a),
+            )
+            if cur.fetchone() is not None:
+                # delete reverse request and become friends
+                cur.execute(
+                    "DELETE FROM character_friend_requests WHERE from_character_id=%s AND to_character_id=%s;",
+                    (b, a),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO character_friends (a_character_id, b_character_id)
+                    VALUES (%s, %s)
+                    ON CONFLICT DO NOTHING;
+                    """,
+                    (ka, kb),
+                )
+                return {"ok": True, "status": "friends"}
+
+            # normal request
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO character_friend_requests (from_character_id, to_character_id)
+                    VALUES (%s, %s);
+                    """,
+                    (a, b),
+                )
+            except Exception:
+                # if you want specific 409: check existence first (simpler)
+                raise HTTPException(status_code=409, detail="Request already exists")
+
+    return {"ok": True, "status": "requested"}
+
+@app.get("/friends/requests/incoming")
+def list_incoming_requests(character_id: str):
+    with db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT r.from_character_id, c.character_name, r.created_at
+                FROM character_friend_requests r
+                JOIN characters c ON c.id = r.from_character_id
+                WHERE r.to_character_id = %s
+                ORDER BY r.created_at ASC;
+                """,
+                (character_id,),
+            )
+            rows = cur.fetchall()
+
+    return {
+        "character_id": character_id,
+        "incoming": [
+            {
+                "from_character_id": str(r[0]),
+                "from_name": r[1],
+                "created_at": r[2].isoformat(),
+            }
+            for r in rows
+        ],
+    }
+
+@app.get("/friends/requests/outgoing")
+def list_outgoing_requests(character_id: str):
+    with db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT r.to_character_id, c.character_name, r.created_at
+                FROM character_friend_requests r
+                JOIN characters c ON c.id = r.to_character_id
+                WHERE r.from_character_id = %s
+                ORDER BY r.created_at ASC;
+                """,
+                (character_id,),
+            )
+            rows = cur.fetchall()
+
+    return {
+        "character_id": character_id,
+        "outgoing": [
+            {
+                "to_character_id": str(r[0]),
+                "to_name": r[1],
+                "created_at": r[2].isoformat(),
+            }
+            for r in rows
+        ],
+    }
+
+@app.post("/friends/request/accept")
+def accept_request(req: SocialActionRequest):
+    me = req.character_id
+    sender = req.target_character_id
+    _assert_not_self(me, sender)
+
+    with db() as conn:
+        with conn.cursor() as cur:
+            _assert_character_owned(cur, me, req.player_id)
+
+            # must exist
+            cur.execute(
+                """
+                SELECT 1 FROM character_friend_requests
+                WHERE from_character_id=%s AND to_character_id=%s;
+                """,
+                (sender, me),
+            )
+            if cur.fetchone() is None:
+                raise HTTPException(status_code=404, detail="Friend request not found")
+
+            # blocks?
+            me_blocks, sender_blocks = _is_blocked_either_way(cur, me, sender)
+            if sender_blocks:
+                raise HTTPException(status_code=403, detail="You are blocked by this character")
+            if me_blocks:
+                raise HTTPException(status_code=409, detail="Unblock this character first")
+
+            # delete request + create friendship
+            cur.execute(
+                "DELETE FROM character_friend_requests WHERE from_character_id=%s AND to_character_id=%s;",
+                (sender, me),
+            )
+            a, b = _friends_key(me, sender)
+            cur.execute(
+                """
+                INSERT INTO character_friends (a_character_id, b_character_id)
+                VALUES (%s, %s)
+                ON CONFLICT DO NOTHING;
+                """,
+                (a, b),
+            )
+
+    return {"ok": True}
+
+@app.post("/friends/request/decline")
+def decline_request(req: SocialActionRequest):
+    me = req.character_id
+    sender = req.target_character_id
+    _assert_not_self(me, sender)
+
+    with db() as conn:
+        with conn.cursor() as cur:
+            _assert_character_owned(cur, me, req.player_id)
+            cur.execute(
+                "DELETE FROM character_friend_requests WHERE from_character_id=%s AND to_character_id=%s;",
+                (sender, me),
+            )
+
+    return {"ok": True}
+
+@app.get("/friends/list")
+def list_friends(character_id: str):
+    with db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                  CASE WHEN f.a_character_id=%s THEN f.b_character_id ELSE f.a_character_id END AS friend_id,
+                  c.character_name,
+                  f.created_at
+                FROM character_friends f
+                JOIN characters c ON c.id = CASE WHEN f.a_character_id=%s THEN f.b_character_id ELSE f.a_character_id END
+                WHERE f.a_character_id=%s OR f.b_character_id=%s
+                ORDER BY c.character_name ASC;
+                """,
+                (character_id, character_id, character_id, character_id),
+            )
+            rows = cur.fetchall()
+
+    return {
+        "character_id": character_id,
+        "friends": [
+            {"character_id": str(r[0]), "character_name": r[1], "since": r[2].isoformat()}
+            for r in rows
+        ],
+    }
+
+@app.post("/friends/remove")
+def remove_friend(req: SocialActionRequest):
+    a = req.character_id
+    b = req.target_character_id
+    _assert_not_self(a, b)
+
+    with db() as conn:
+        with conn.cursor() as cur:
+            _assert_character_owned(cur, a, req.player_id)
+            ka, kb = _friends_key(a, b)
+            cur.execute(
+                "DELETE FROM character_friends WHERE a_character_id=%s AND b_character_id=%s;",
+                (ka, kb),
+            )
+    return {"ok": True}
+
+@app.post("/blocks/add")
+def add_block(req: SocialActionRequest):
+    blocker = req.character_id
+    blocked = req.target_character_id
+    _assert_not_self(blocker, blocked)
+
+    with db() as conn:
+        with conn.cursor() as cur:
+            _assert_character_owned(cur, blocker, req.player_id)
+
+            # add block
+            cur.execute(
+                """
+                INSERT INTO character_blocks (blocker_character_id, blocked_character_id)
+                VALUES (%s, %s)
+                ON CONFLICT DO NOTHING;
+                """,
+                (blocker, blocked),
+            )
+
+            # remove friendship if exists
+            a, b = _friends_key(blocker, blocked)
+            cur.execute(
+                "DELETE FROM character_friends WHERE a_character_id=%s AND b_character_id=%s;",
+                (a, b),
+            )
+
+            # remove any pending requests either direction
+            cur.execute(
+                """
+                DELETE FROM character_friend_requests
+                WHERE (from_character_id=%s AND to_character_id=%s)
+                   OR (from_character_id=%s AND to_character_id=%s);
+                """,
+                (blocker, blocked, blocked, blocker),
+            )
+
+    return {"ok": True}
+
+@app.post("/blocks/remove")
+def remove_block(req: SocialActionRequest):
+    blocker = req.character_id
+    blocked = req.target_character_id
+    _assert_not_self(blocker, blocked)
+
+    with db() as conn:
+        with conn.cursor() as cur:
+            _assert_character_owned(cur, blocker, req.player_id)
+            cur.execute(
+                "DELETE FROM character_blocks WHERE blocker_character_id=%s AND blocked_character_id=%s;",
+                (blocker, blocked),
+            )
+    return {"ok": True}
+
+@app.get("/blocks/list")
+def list_blocks(character_id: str):
+    with db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT b.blocked_character_id, c.character_name, b.created_at
+                FROM character_blocks b
+                JOIN characters c ON c.id = b.blocked_character_id
+                WHERE b.blocker_character_id = %s
+                ORDER BY c.character_name ASC;
+                """,
+                (character_id,),
+            )
+            rows = cur.fetchall()
+
+    return {
+        "character_id": character_id,
+        "blocked": [
+            {"character_id": str(r[0]), "character_name": r[1], "created_at": r[2].isoformat()}
+            for r in rows
+        ],
     }
