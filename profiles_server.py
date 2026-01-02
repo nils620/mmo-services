@@ -2,6 +2,8 @@ import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import psycopg
+from typing import Optional
+
 
 # Read from environment (systemd will provide these)
 DB_DSN = os.environ.get("DB_DSN")
@@ -26,6 +28,16 @@ class CreateCharacterRequest(BaseModel):
 class UpdateCustomizationRequest(BaseModel):
     player_id: str
     customization_id: str
+
+class UpdateProfileRequest(BaseModel):
+    player_id: str
+    character_id: str
+
+    age: Optional[int] = None
+    interests: Optional[str] = ""
+    languages: Optional[str] = ""
+    about_me: Optional[str] = ""
+
 
 def db():
     return psycopg.connect(DB_DSN)
@@ -175,3 +187,96 @@ def update_character_customization_put(character_id: str, req: UpdateCustomizati
         raise HTTPException(status_code=404, detail="Character not found for this player")
 
     return {"ok": True, "character_id": str(row[0]), "customization_id": row[1]}
+
+
+
+@app.get("/profiles/{character_id}")
+def get_profile(character_id: str):
+    with db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    c.id,
+                    c.character_name,
+                    c.created_at,
+                    p.age,
+                    p.interests,
+                    p.languages,
+                    p.about_me
+                FROM characters c
+                LEFT JOIN character_profiles p ON p.character_id = c.id
+                WHERE c.id = %s;
+                """,
+                (character_id,),
+            )
+            row = cur.fetchone()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Character not found")
+
+    return {
+        "character_id": str(row[0]),
+        "character_name": row[1],
+        "created_at": row[2].isoformat(),
+        "age": row[3],
+        "interests": row[4] or "",
+        "languages": row[5] or "",
+        "about_me": row[6] or "",
+    }
+
+
+@app.post("/profiles/update")
+def update_profile(req: UpdateProfileRequest):
+    interests = (req.interests or "").strip()
+    languages = (req.languages or "").strip()
+    about_me = (req.about_me or "").strip()
+
+    # Validation
+    if req.age is not None and (req.age < 18 or req.age > 120):
+        raise HTTPException(status_code=400, detail="Age must be between 18 and 120")
+
+    if len(interests) > 80:
+        raise HTTPException(status_code=400, detail="Interests too long (max 80)")
+    if len(languages) > 80:
+        raise HTTPException(status_code=400, detail="Languages too long (max 80)")
+    if len(about_me) > 800:
+        raise HTTPException(status_code=400, detail="About me too long (max 800)")
+
+    with db() as conn:
+        with conn.cursor() as cur:
+            # ownership check
+            cur.execute(
+                "SELECT 1 FROM characters WHERE id = %s AND player_id = %s;",
+                (req.character_id, req.player_id),
+            )
+            if cur.fetchone() is None:
+                raise HTTPException(status_code=404, detail="Character not found for this player")
+
+            # upsert profile
+            cur.execute(
+                """
+                INSERT INTO character_profiles (character_id, age, interests, languages, about_me, updated_at)
+                VALUES (%s, %s, %s, %s, %s, now())
+                ON CONFLICT (character_id)
+                DO UPDATE SET
+                    age = EXCLUDED.age,
+                    interests = EXCLUDED.interests,
+                    languages = EXCLUDED.languages,
+                    about_me = EXCLUDED.about_me,
+                    updated_at = now()
+                RETURNING character_id, age, interests, languages, about_me, updated_at;
+                """,
+                (req.character_id, req.age, interests, languages, about_me),
+            )
+            row = cur.fetchone()
+
+    return {
+        "ok": True,
+        "character_id": str(row[0]),
+        "age": row[1],
+        "interests": row[2] or "",
+        "languages": row[3] or "",
+        "about_me": row[4] or "",
+        "updated_at": row[5].isoformat(),
+    }
