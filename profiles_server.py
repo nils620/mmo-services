@@ -216,7 +216,7 @@ def get_profile(character_id: str):
                     p.age,
                     p.interests,
                     p.languages,
-                    p.about_me
+                    p.about_me,
                     p.share_location,
                     p.text_r, p.text_g, p.text_b, p.text_a,
                     p.bg_r, p.bg_g, p.bg_b, p.bg_a
