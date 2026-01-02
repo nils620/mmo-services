@@ -29,6 +29,13 @@ class UpdateCustomizationRequest(BaseModel):
     player_id: str
     customization_id: str
 
+
+class ColorRGBA(BaseModel):
+    r: float
+    g: float
+    b: float
+    a: float
+
 class UpdateProfileRequest(BaseModel):
     player_id: str
     character_id: str
@@ -38,6 +45,12 @@ class UpdateProfileRequest(BaseModel):
     languages: Optional[str] = ""
     about_me: Optional[str] = ""
 
+    share_location: Optional[bool] = False
+    text_color: Optional[ColorRGBA] = None
+    background_color: Optional[ColorRGBA] = None
+
+def clamp01(x: float) -> float:
+    return max(0.0, min(1.0, float(x)))
 
 def db():
     return psycopg.connect(DB_DSN)
@@ -204,6 +217,9 @@ def get_profile(character_id: str):
                     p.interests,
                     p.languages,
                     p.about_me
+                    p.share_location,
+                    p.text_r, p.text_g, p.text_b, p.text_a,
+                    p.bg_r, p.bg_g, p.bg_b, p.bg_a
                 FROM characters c
                 LEFT JOIN character_profiles p ON p.character_id = c.id
                 WHERE c.id = %s;
@@ -223,6 +239,9 @@ def get_profile(character_id: str):
         "interests": row[4] or "",
         "languages": row[5] or "",
         "about_me": row[6] or "",
+        "share_location": bool(row[7]) if row[7] is not None else False,
+        "text_color": {"r": row[8], "g": row[9], "b": row[10], "a": row[11]},
+        "background_color": {"r": row[12], "g": row[13], "b": row[14], "a": row[15]},
     }
 
 
@@ -243,32 +262,69 @@ def update_profile(req: UpdateProfileRequest):
     if len(about_me) > 800:
         raise HTTPException(status_code=400, detail="About me too long (max 800)")
 
+    share_location = bool(req.share_location) if req.share_location is not None else False
+
+    tc = req.text_color or ColorRGBA(r=1, g=1, b=1, a=1)
+    bc = req.background_color or ColorRGBA(r=0.2, g=0.2, b=0.2, a=1)
+
+    text_r, text_g, text_b, text_a = map(clamp01, [tc.r, tc.g, tc.b, tc.a])
+    bg_r, bg_g, bg_b, bg_a = map(clamp01, [bc.r, bc.g, bc.b, bc.a])
+
     with db() as conn:
         with conn.cursor() as cur:
-            # ownership check
+            # Ensure character exists AND belongs to player
             cur.execute(
-                "SELECT 1 FROM characters WHERE id = %s AND player_id = %s;",
+                """
+                SELECT 1
+                FROM characters
+                WHERE id = %s AND player_id = %s;
+                """,
                 (req.character_id, req.player_id),
             )
             if cur.fetchone() is None:
-                raise HTTPException(status_code=404, detail="Character not found for this player")
+                raise HTTPException(status_code=403, detail="Character not owned by player")
 
-            # upsert profile
+            # UPSERT profile row
             cur.execute(
                 """
-                INSERT INTO character_profiles (character_id, age, interests, languages, about_me, updated_at)
-                VALUES (%s, %s, %s, %s, %s, now())
+                INSERT INTO character_profiles (
+                    character_id, age, interests, languages, about_me,
+                    share_location,
+                    text_r, text_g, text_b, text_a,
+                    bg_r, bg_g, bg_b, bg_a,
+                    updated_at
+                )
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now())
                 ON CONFLICT (character_id)
                 DO UPDATE SET
                     age = EXCLUDED.age,
                     interests = EXCLUDED.interests,
                     languages = EXCLUDED.languages,
                     about_me = EXCLUDED.about_me,
+                    share_location = EXCLUDED.share_location,
+                    text_r = EXCLUDED.text_r,
+                    text_g = EXCLUDED.text_g,
+                    text_b = EXCLUDED.text_b,
+                    text_a = EXCLUDED.text_a,
+                    bg_r = EXCLUDED.bg_r,
+                    bg_g = EXCLUDED.bg_g,
+                    bg_b = EXCLUDED.bg_b,
+                    bg_a = EXCLUDED.bg_a,
                     updated_at = now()
-                RETURNING character_id, age, interests, languages, about_me, updated_at;
+                RETURNING
+                    character_id, age, interests, languages, about_me, share_location,
+                    text_r, text_g, text_b, text_a,
+                    bg_r, bg_g, bg_b, bg_a,
+                    updated_at;
                 """,
-                (req.character_id, req.age, interests, languages, about_me),
+                (
+                    req.character_id, req.age, interests, languages, about_me,
+                    share_location,
+                    text_r, text_g, text_b, text_a,
+                    bg_r, bg_g, bg_b, bg_a,
+                ),
             )
+
             row = cur.fetchone()
 
     return {
@@ -278,5 +334,8 @@ def update_profile(req: UpdateProfileRequest):
         "interests": row[2] or "",
         "languages": row[3] or "",
         "about_me": row[4] or "",
-        "updated_at": row[5].isoformat(),
+        "share_location": bool(row[5]),
+        "text_color": {"r": row[6], "g": row[7], "b": row[8], "a": row[9]},
+        "background_color": {"r": row[10], "g": row[11], "b": row[12], "a": row[13]},
+        "updated_at": row[14].isoformat(),
     }
