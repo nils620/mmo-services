@@ -567,12 +567,19 @@ def list_friends(character_id: str):
             cur.execute(
                 """
                 SELECT
-                  CASE WHEN f.a_character_id=%s THEN f.b_character_id ELSE f.a_character_id END AS friend_id,
+                  CASE
+                    WHEN f.character_a_id = %s THEN f.character_b_id
+                    ELSE f.character_a_id
+                  END AS friend_id,
                   c.character_name,
                   f.created_at
                 FROM character_friends f
-                JOIN characters c ON c.id = CASE WHEN f.a_character_id=%s THEN f.b_character_id ELSE f.a_character_id END
-                WHERE f.a_character_id=%s OR f.b_character_id=%s
+                JOIN characters c
+                  ON c.id = CASE
+                    WHEN f.character_a_id = %s THEN f.character_b_id
+                    ELSE f.character_a_id
+                  END
+                WHERE f.character_a_id = %s OR f.character_b_id = %s
                 ORDER BY c.character_name ASC;
                 """,
                 (character_id, character_id, character_id, character_id),
