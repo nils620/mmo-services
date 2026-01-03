@@ -401,7 +401,7 @@ def send_friend_request(req: SocialActionRequest):
             # already friends?
             ka, kb = _friends_key(a, b)
             cur.execute(
-                "SELECT 1 FROM character_friends WHERE a_character_id=%s AND b_character_id=%s;",
+                "SELECT 1 FROM character_friends WHERE character_a_id=%s AND character_b_id=%s;",
                 (ka, kb),
             )
             if cur.fetchone() is not None:
@@ -420,7 +420,7 @@ def send_friend_request(req: SocialActionRequest):
                 )
                 cur.execute(
                     """
-                    INSERT INTO character_friends (a_character_id, b_character_id)
+                    INSERT INTO character_friends (character_a_id, character_b_id)
                     VALUES (%s, %s)
                     ON CONFLICT DO NOTHING;
                     """,
@@ -535,7 +535,7 @@ def accept_request(req: SocialActionRequest):
             a, b = _friends_key(me, sender)
             cur.execute(
                 """
-                INSERT INTO character_friends (a_character_id, b_character_id)
+                INSERT INTO character_friends (character_a_id, character_b_id)
                 VALUES (%s, %s)
                 ON CONFLICT DO NOTHING;
                 """,
@@ -605,7 +605,7 @@ def remove_friend(req: SocialActionRequest):
             _assert_character_owned(cur, a, req.player_id)
             ka, kb = _friends_key(a, b)
             cur.execute(
-                "DELETE FROM character_friends WHERE a_character_id=%s AND b_character_id=%s;",
+                "DELETE FROM character_friends WHERE character_a_id=%s AND character_b_id=%s;",
                 (ka, kb),
             )
     return {"ok": True}
@@ -633,7 +633,7 @@ def add_block(req: SocialActionRequest):
             # remove friendship if exists
             a, b = _friends_key(blocker, blocked)
             cur.execute(
-                "DELETE FROM character_friends WHERE a_character_id=%s AND b_character_id=%s;",
+                "DELETE FROM character_friends WHERE character_a_id=%s AND character_b_id=%s;",
                 (a, b),
             )
 
