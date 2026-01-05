@@ -114,6 +114,17 @@ def create_character(req: CreateCharacterRequest):
                     """,
                     (req.player_id, name, customization_id),
                 )
+                character_id, character_name, customization_id = cur.fetchone()
+
+                # ✅ create default profile row (defaults apply here)
+                cur.execute(
+                    """
+                    INSERT INTO character_profiles (character_id)
+                    VALUES (%s)
+                    ON CONFLICT (character_id) DO NOTHING;
+                    """,
+                    (character_id,),
+                )
             except psycopg.errors.UniqueViolation:
                 raise HTTPException(status_code=409, detail="Character name already used by this player")
 
