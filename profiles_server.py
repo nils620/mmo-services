@@ -114,9 +114,13 @@ def create_character(req: CreateCharacterRequest):
                     """,
                     (req.player_id, name, customization_id),
                 )
-                character_id, character_name, customization_id = cur.fetchone()
+                row = cur.fetchone()
+                if row is None:
+                    raise HTTPException(status_code=500, detail="Character insert failed (no row returned)")
 
-                # ✅ create default profile row (defaults apply here)
+                character_id, character_name, customization_id = row
+
+                # create default profile row (defaults apply here)
                 cur.execute(
                     """
                     INSERT INTO character_profiles (character_id)
@@ -125,10 +129,11 @@ def create_character(req: CreateCharacterRequest):
                     """,
                     (character_id,),
                 )
-            except psycopg.errors.UniqueViolation:
-                raise HTTPException(status_code=409, detail="Character name already used by this player")
 
-            character_id, character_name, customization_id = cur.fetchone()
+            except psycopg.errors.UniqueViolation:
+                # optional but clean: reset transaction state if you ever continue using conn
+                conn.rollback()
+                raise HTTPException(status_code=409, detail="Character name already used by this player")
 
     return {
         "character_id": str(character_id),
