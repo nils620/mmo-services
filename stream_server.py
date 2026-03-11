@@ -37,11 +37,6 @@ def _resolve_sync(url: str) -> dict:
         'quiet': True,
         'no_warnings': True,
         'socket_timeout': 15,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['web'],
-            }
-        },
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
@@ -49,10 +44,13 @@ def _resolve_sync(url: str) -> dict:
             info = info['entries'][0]
         return {
             'resolved_url': info['url'],
+            'audio_url': None,
             'title': info.get('title') or '',
             'duration': info.get('duration') or 0,
             'is_live': bool(info.get('is_live', False)),
             'thumbnail': info.get('thumbnail') or '',
+            'quality': info.get('height') or 0,
+            'is_dash': False,
         }
 
 @router.get("/health")
