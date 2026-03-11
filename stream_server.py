@@ -33,10 +33,15 @@ def needs_resolution(url: str) -> bool:
 
 def _resolve_sync(url: str) -> dict:
     opts = {
-        'format': 'best[ext=mp4][protocol=https]/best[protocol=m3u8]/best',
+        'format': 'best[protocol=m3u8]/best[ext=mp4][vcodec^=avc1]/best',
         'quiet': True,
         'no_warnings': True,
         'socket_timeout': 15,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['web'],
+            }
+        },
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
