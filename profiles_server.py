@@ -3,7 +3,8 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import psycopg
 from typing import Optional, List, Literal
-
+#mounting stream_server to use same port
+from stream_server import router as stream_router
 
 # Read from environment (systemd will provide these)
 DB_DSN = os.environ.get("DB_DSN")
@@ -13,7 +14,8 @@ if not DB_DSN:
     raise RuntimeError("DB_DSN is not set. Put it into the systemd Environment/EnvironmentFile.")
 
 app = FastAPI()
-
+#mounting stream_server to use same port
+app.include_router(stream_router, prefix="/stream")
 
 class LoginRequest(BaseModel):
     provider: str        # "steam"
