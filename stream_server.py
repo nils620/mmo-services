@@ -37,6 +37,12 @@ def _resolve_sync(url: str) -> dict:
         'quiet': True,
         'no_warnings': True,
         'socket_timeout': 15,
+        'noplaylist': True,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['tv_embedded'],
+            }
+        },
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
