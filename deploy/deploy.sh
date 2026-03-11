@@ -11,6 +11,7 @@ UNIT_DST_PROFILES="/etc/systemd/system/profiles.service"
 # install deps (comment out if you already did)
 apt-get update -y
 apt-get install -y python3 python3-pip
+apt-get install -y nodejs
 
 # (optional) virtualenv
 python3 -m venv "${REPO_DIR}/venv"
