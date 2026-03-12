@@ -13,6 +13,7 @@ UNIT_DST_BGUTIL="/etc/systemd/system/bgutil.service"
 # install system deps
 apt-get update -y
 apt-get install -y python3 python3-pip
+apt-get install -y python3 python3-pip ffmpeg
 
 # install Node.js 20
 curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
