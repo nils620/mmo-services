@@ -36,18 +36,18 @@ def needs_resolution(url: str) -> bool:
 
 def _resolve_sync(url: str) -> dict:
     opts = {
-        'format': 'bestvideo[vcodec^=avc1][height<=1080]+bestaudio[acodec^=mp4a]/18/best',
-        'quiet': True,
-        'no_warnings': True,
-        'socket_timeout': 15,
-        'noplaylist': True,
-        'js_runtimes': {'node': {'path': '/usr/bin/node'}},
-        'extractor_args': {
-            'youtubepot-bgutilhttp': {
-                'base_url': 'http://127.0.0.1:4416',
-            }
-        },
-    }
+    'format': 'bestvideo[vcodec^=avc1][height<=1080]+bestaudio[acodec^=mp4a]/18/best',
+    'quiet': True,
+    'no_warnings': True,
+    'socket_timeout': 15,
+    'noplaylist': True,
+    'js_runtimes': {'node': {'path': '/usr/bin/node'}},
+    'extractor_args': {
+        'youtubepot-bgutilhttp': {
+            'base_url': 'http://127.0.0.1:4416',
+        }
+    },
+}
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
         if 'entries' in info:

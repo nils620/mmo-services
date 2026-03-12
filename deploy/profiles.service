@@ -1,6 +1,7 @@
 [Unit]
-Description=Potential Profiles API
-After=network.target
+Description=Potential Profiles Service
+After=network.target bgutil.service
+Requires=bgutil.service
 
 [Service]
 WorkingDirectory=/root/mmo-services
