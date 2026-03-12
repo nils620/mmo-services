@@ -1,0 +1,12 @@
+[Unit]
+Description=BGUtil PO Token Provider
+After=network.target
+
+[Service]
+WorkingDirectory=/root/bgutil-ytdlp-pot-provider/server
+ExecStart=/usr/bin/node /root/bgutil-ytdlp-pot-provider/server/build/src/main.js
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
