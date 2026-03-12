@@ -44,14 +44,14 @@ cp "${UNIT_SRC_BGUTIL}" "${UNIT_DST_BGUTIL}"
 
 systemctl daemon-reload
 
+systemctl enable --now bgutil
 systemctl enable --now chat
 systemctl enable --now profiles
-systemctl enable --now bgutil
 
+systemctl restart --now bgutil
 systemctl restart --now chat
 systemctl restart --now profiles
-systemctl restart --now bgutil
 
+systemctl status bgutil --no-pager || true
 systemctl status chat --no-pager || true
 systemctl status profiles --no-pager || true
-systemctl status bgutil --no-pager || true
