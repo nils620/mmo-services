@@ -41,6 +41,7 @@ def _resolve_sync(url: str) -> dict:
         'no_warnings': True,
         'socket_timeout': 15,
         'noplaylist': True,
+        'js_runtimes': 'node:/usr/bin/node',
         'extractor_args': {
             'youtubepot-bgutilhttp': {
                 'base_url': 'http://127.0.0.1:4416',
