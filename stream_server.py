@@ -104,7 +104,7 @@ async def resolve(req: ResolveRequest):
     url = req.url.strip()
 
     if not url:
-        raise HTTPException(status_code=400, detail="URL is empty")
+        raise HTTPException(status_code=400, detail="URL is INVALID")
 
     if is_blocked(url):
         raise HTTPException(status_code=403, detail="SITE_BLOCKED")
@@ -133,9 +133,9 @@ async def resolve(req: ResolveRequest):
     except Exception as e:
         err = str(e)
         if 'Sign in to confirm' in err or 'bot' in err.lower():
-            raise HTTPException(status_code=403, detail="YOUTUBE_BOT_DETECTED")
+            raise HTTPException(status_code=403, detail="YOUTUBE BOT DETECTION Youtube being a Bitch, try a different video")
         if 'Private video' in err:
-            raise HTTPException(status_code=403, detail="VIDEO_PRIVATE")
+            raise HTTPException(status_code=403, detail="VIDEO is PRIVATE")
         if 'unavailable' in err.lower():
-            raise HTTPException(status_code=404, detail="VIDEO_UNAVAILABLE")
+            raise HTTPException(status_code=404, detail="VIDEO is UNAVAILABLE")
         raise HTTPException(status_code=422, detail=err)
