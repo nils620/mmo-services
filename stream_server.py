@@ -9,7 +9,7 @@ from typing import Optional
 
 router = APIRouter()
 
-PIPED_API = "https://pipedapi.kavin.rocks"
+PIPED_API = "https://pipedapi.syncpundit.io/"
 
 BLOCKED_DOMAINS = [
     'pornhub.com', 'xvideos.com', 'xhamster.com', 'onlyfans.com',
