@@ -34,7 +34,6 @@ def needs_resolution(url: str) -> bool:
     domain = get_domain(url)
     return any(n in domain for n in NEEDS_RESOLVER)
 
-
 def _resolve_sync(url: str) -> dict:
     opts = {
         'format': 'bestvideo[vcodec^=avc1][height<=1080]+bestaudio[acodec^=mp4a]/18/best',
