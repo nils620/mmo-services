@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 WorkingDirectory=/root/bgutil-ytdlp-pot-provider/server
-ExecStart=/usr/bin/node /root/bgutil-ytdlp-pot-provider/server/build/src/main.js
+ExecStart=/usr/bin/node /root/bgutil-ytdlp-pot-provider/server/build/main.js
 Restart=always
 RestartSec=2
 
