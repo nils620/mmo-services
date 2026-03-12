@@ -1,10 +1,15 @@
 import asyncio
+import urllib.request
+import json as jsonlib
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 import yt_dlp
+from typing import Optional
 
 router = APIRouter()
+
+PIPED_API = "https://pipedapi.kavin.rocks"
 
 BLOCKED_DOMAINS = [
     'pornhub.com', 'xvideos.com', 'xhamster.com', 'onlyfans.com',
@@ -31,18 +36,76 @@ def needs_resolution(url: str) -> bool:
     domain = get_domain(url)
     return any(n in domain for n in NEEDS_RESOLVER)
 
+def _extract_youtube_id(url: str) -> Optional[str]:
+    parsed = urlparse(url)
+    # youtube.com/watch?v=xxx
+    qs = parse_qs(parsed.query)
+    if 'v' in qs:
+        return qs['v'][0]
+    # youtu.be/xxx
+    if 'youtu.be' in parsed.netloc:
+        return parsed.path.lstrip('/')
+    return None
+
+def _resolve_youtube_piped(video_id: str) -> dict:
+    req = urllib.request.Request(
+        f"{PIPED_API}/streams/{video_id}",
+        headers={'User-Agent': 'Mozilla/5.0'}
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        data = jsonlib.loads(resp.read())
+
+    # Pick best mp4 video stream with H.264
+    video_streams = [
+        s for s in data.get('videoStreams', [])
+        if 'avc1' in s.get('codec', '') and s.get('mimeType') == 'video/mp4'
+    ]
+    # Pick best m4a audio stream
+    audio_streams = [
+        s for s in data.get('audioStreams', [])
+        if s.get('mimeType') == 'audio/mp4'
+    ]
+
+    # Sort by quality descending, cap at 1080p
+    video_streams.sort(key=lambda s: s.get('quality', 0), reverse=True)
+    audio_streams.sort(key=lambda s: s.get('bitrate', 0), reverse=True)
+
+    # Filter to max 1080p
+    video_streams = [s for s in video_streams if s.get('height', 0) <= 1080]
+
+    if not video_streams:
+        raise Exception("No compatible video stream found via Piped")
+
+    video_url = video_streams[0]['url']
+    audio_url = audio_streams[0]['url'] if audio_streams else None
+
+    return {
+        'resolved_url': video_url,
+        'audio_url': audio_url,
+        'title': data.get('title') or '',
+        'duration': data.get('duration') or 0,
+        'is_live': bool(data.get('livestream', False)),
+        'thumbnail': data.get('thumbnailUrl') or '',
+        'quality': video_streams[0].get('height') or 0,
+        'is_dash': False,
+    }
+
 def _resolve_sync(url: str) -> dict:
+    # YouTube → use Piped API
+    domain = get_domain(url)
+    if 'youtube.com' in domain or 'youtu.be' in domain:
+        video_id = _extract_youtube_id(url)
+        if not video_id:
+            raise Exception("Could not extract YouTube video ID")
+        return _resolve_youtube_piped(video_id)
+
+    # Everything else → yt-dlp (Twitch, Vimeo, etc.)
     opts = {
-        'format': '18/best[ext=mp4]/best',
+        'format': 'best[ext=mp4]/best',
         'quiet': True,
         'no_warnings': True,
         'socket_timeout': 15,
         'noplaylist': True,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['mweb'],
-            }
-        },
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
