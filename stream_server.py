@@ -46,21 +46,27 @@ def get_cookie_status() -> dict:
         'needs_refresh': age_days > COOKIE_MAX_AGE_DAYS,
     }
 
+
 def _resolve_sync(url: str) -> dict:
+    domain = get_domain(url)
+
     opts = {
-        'format': 'bestvideo[vcodec^=avc1][height<=1080]+bestaudio[acodec^=mp4a]/18/best',
+        'format': 'best[vcodec^=avc1]/18/best',
         'quiet': True,
         'no_warnings': True,
         'socket_timeout': 15,
         'noplaylist': True,
         'js_runtimes': {'node': {'path': '/usr/bin/node'}},
-        'proxy': 'http://user:password123@79.227.81.251:8899',
         'extractor_args': {
             'youtubepot-bgutilhttp': {
                 'base_url': 'http://127.0.0.1:4416',
             }
         },
     }
+
+    # Only proxy YouTube
+    if 'youtube.com' in domain or 'youtu.be' in domain:
+        opts['proxy'] = 'http://user:password123@79.227.81.251:8899'
 
     cookie_status = get_cookie_status()
     if cookie_status['exists']:
