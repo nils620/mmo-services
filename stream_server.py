@@ -48,7 +48,7 @@ def get_cookie_status() -> dict:
 
 def _resolve_sync(url: str) -> dict:
     opts = {
-        'format': 'best[vcodec^=avc1]/18/best',
+        'format': 'bestvideo[vcodec^=avc1][height<=1080]+bestaudio[acodec^=mp4a]/18/best',
         'quiet': True,
         'no_warnings': True,
         'socket_timeout': 15,
