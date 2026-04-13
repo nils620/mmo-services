@@ -58,6 +58,7 @@ def _resolve_sync(url: str) -> dict:
         'socket_timeout': 15,
         'noplaylist': True,
         'js_runtimes': {'node': {'path': '/usr/bin/node'}},
+        'remote_components': {'ejs:github'},
         'extractor_args': {
             'youtubepot-bgutilhttp': {
                 'base_url': 'http://127.0.0.1:4416',
@@ -65,7 +66,6 @@ def _resolve_sync(url: str) -> dict:
         },
     }
 
-    # Only proxy YouTube
     if 'youtube.com' in domain or 'youtu.be' in domain:
         opts['proxy'] = YOUTUBE_PROXY
 
