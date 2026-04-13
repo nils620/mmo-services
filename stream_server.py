@@ -8,9 +8,6 @@ import yt_dlp
 
 router = APIRouter()
 
-COOKIE_FILE = '/root/yt-cookies.txt'
-COOKIE_MAX_AGE_DAYS = 21
-
 BLOCKED_DOMAINS = [
     'pornhub.com', 'xvideos.com', 'xhamster.com', 'onlyfans.com',
     'redtube.com', 'xnxx.com', 'spankbang.com', 'youporn.com',
@@ -21,6 +18,10 @@ NEEDS_RESOLVER = [
     'dailymotion.com', 'twitter.com', 'x.com', 'tiktok.com',
     'bilibili.com', 'nicovideo.jp', 'reddit.com',
 ]
+
+YOUTUBE_PROXY = 'http://spvk2774on:mmtnz=86yeYeQ42kPL@isp.decodo.com:10001'
+COOKIE_FILE = '/root/yt-cookies.txt'
+COOKIE_MAX_AGE_DAYS = 21
 
 class ResolveRequest(BaseModel):
     url: str
@@ -66,7 +67,7 @@ def _resolve_sync(url: str) -> dict:
 
     # Only proxy YouTube
     if 'youtube.com' in domain or 'youtu.be' in domain:
-        opts['proxy'] = 'http://user:password123@79.227.81.251:8899'
+        opts['proxy'] = YOUTUBE_PROXY
 
     cookie_status = get_cookie_status()
     if cookie_status['exists']:
@@ -140,7 +141,7 @@ async def resolve(req: ResolveRequest):
     except Exception as e:
         err = str(e)
         if 'Sign in to confirm' in err or 'bot' in err.lower():
-            raise HTTPException(status_code=403, detail="YOUTUBE BOT DETECTION Youtube being a Bitch, try a different video")
+            raise HTTPException(status_code=403, detail="YOUTUBE BOT DETECTION, try a different video")
         if 'Private video' in err:
             raise HTTPException(status_code=403, detail="VIDEO is PRIVATE")
         if 'unavailable' in err.lower():
