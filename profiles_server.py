@@ -6,7 +6,7 @@ from typing import Optional, List, Literal
 
 #mounting processes to use same port
 from stream_server import router as stream_router
-from worlds-ugc import router as worlds_router
+from worlds_server import router as worlds_router
 
 
 
