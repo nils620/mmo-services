@@ -209,38 +209,3 @@ def delete_world(world_id: str, player_id: str):
             )
 
     return {"ok": True, "world_id": world_id}
-
-
-# ── SQL migration (run once on DB) ───────────────────────────────────────────
-#
-# CREATE TABLE worlds (
-#     id             UUID        PRIMARY KEY,
-#     player_id      UUID        NOT NULL REFERENCES players(id) ON DELETE CASCADE,
-#     title          TEXT        NOT NULL,
-#     description    TEXT        DEFAULT '',
-#     world_key      TEXT        NOT NULL,   -- Spaces object key for .world file
-#     thumb_key      TEXT        NOT NULL,   -- Spaces object key for thumbnail
-#     thumbnail_url  TEXT        NOT NULL,   -- CDN URL (public)
-#     download_count INTEGER     DEFAULT 0,
-#     created_at     TIMESTAMPTZ DEFAULT now(),
-#     updated_at     TIMESTAMPTZ DEFAULT now()
-# );
-# CREATE INDEX worlds_created_at_idx ON worlds (created_at DESC);
-# CREATE INDEX worlds_player_id_idx  ON worlds (player_id);
-#
-# ── profiles_server.py additions ─────────────────────────────────────────────
-#
-# from worlds_server import router as worlds_router
-# app.include_router(worlds_router, prefix="/worlds")
-#
-# ── redistrb.txt additions ───────────────────────────────────────────────────
-#
-# boto3
-# python-multipart
-#
-# ── profiles.service env additions ──────────────────────────────────────────
-#
-# Environment=SPACES_KEY=your_do_spaces_key
-# Environment=SPACES_SECRET=your_do_spaces_secret
-# Environment=SPACES_BUCKET=content-server
-# Environment=CDN_BASE=https://content-server.fra1.cdn.digitaloceanspaces.com
