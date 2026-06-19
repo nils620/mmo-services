@@ -60,11 +60,11 @@ def _decode_base64(value: str, field_name: str) -> bytes:
 
 
 class UploadWorldRequest(BaseModel):
-    player_id:          str
-    title:              str
-    description:        Optional[str] = ""
-    world_file_base64:  str                  # base64-encoded .world file bytes, required
-    thumbnail_base64:   Optional[str] = None  # base64-encoded .png bytes, optional
+    player_id:         str
+    title:             str
+    description:       Optional[str] = ""
+    world_data:        str                  # raw serialized world string (your existing save format), required
+    thumbnail_base64:  Optional[str] = None  # base64-encoded .png bytes, optional — binary data only
 
 
 # ── endpoints ─────────────────────────────────────────────────────────────────
@@ -80,10 +80,10 @@ def upload_world(req: UploadWorldRequest):
         raise HTTPException(status_code=400, detail="Title too long (max 64)")
     if len(description) > 500:
         raise HTTPException(status_code=400, detail="Description too long (max 500)")
-    if not req.world_file_base64:
-        raise HTTPException(status_code=400, detail="world_file_base64 is empty")
+    if not req.world_data:
+        raise HTTPException(status_code=400, detail="world_data is empty")
 
-    world_data = _decode_base64(req.world_file_base64, "world_file_base64")
+    world_data = req.world_data.encode("utf-8")
     if len(world_data) > MAX_WORLD_BYTES:
         raise HTTPException(status_code=400, detail="World file too large (max 5 MB)")
 
@@ -109,7 +109,7 @@ def upload_world(req: UploadWorldRequest):
     client = s3()
     client.put_object(
         Bucket=SPACES_BUCKET, Key=world_key,
-        Body=world_data, ContentType="application/octet-stream", ACL="public-read",
+        Body=world_data, ContentType="application/json", ACL="public-read",
     )
     if thumb_data:
         client.put_object(
@@ -226,3 +226,5 @@ def delete_world(world_id: str, player_id: str):
             )
 
     return {"ok": True, "world_id": world_id}
+
+
