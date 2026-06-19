@@ -1,7 +1,11 @@
 import os
 import uuid
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+import base64
+import binascii
+from typing import Optional
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import RedirectResponse
+from pydantic import BaseModel
 import boto3
 from botocore.client import Config
 import psycopg
@@ -48,18 +52,27 @@ def _assert_owns_world(cur, world_id: str, player_id: str):
         raise HTTPException(status_code=403, detail="World not found or not owned by player")
 
 
+def _decode_base64(value: str, field_name: str) -> bytes:
+    try:
+        return base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status_code=400, detail=f"{field_name} is not valid base64")
+
+
+class UploadWorldRequest(BaseModel):
+    player_id:          str
+    title:              str
+    description:        Optional[str] = ""
+    world_file_base64:  str                  # base64-encoded .world file bytes, required
+    thumbnail_base64:   Optional[str] = None  # base64-encoded .png bytes, optional
+
+
 # ── endpoints ─────────────────────────────────────────────────────────────────
 
 @router.post("/upload")
-async def upload_world(
-    player_id:   str        = Form(...),
-    title:       str        = Form(...),
-    description: str        = Form(""),
-    world_file:  UploadFile = File(...),
-    thumbnail:   UploadFile = File(...),
-):
-    title       = title.strip()
-    description = description.strip()
+def upload_world(req: UploadWorldRequest):
+    title       = req.title.strip()
+    description = (req.description or "").strip()
 
     if not title:
         raise HTTPException(status_code=400, detail="Title is empty")
@@ -67,28 +80,30 @@ async def upload_world(
         raise HTTPException(status_code=400, detail="Title too long (max 64)")
     if len(description) > 500:
         raise HTTPException(status_code=400, detail="Description too long (max 500)")
-    if not (world_file.filename or "").endswith(".world"):
-        raise HTTPException(status_code=400, detail="World file must end in .world")
+    if not req.world_file_base64:
+        raise HTTPException(status_code=400, detail="world_file_base64 is empty")
 
-    world_data = await world_file.read()
-    thumb_data = await thumbnail.read()
-
+    world_data = _decode_base64(req.world_file_base64, "world_file_base64")
     if len(world_data) > MAX_WORLD_BYTES:
         raise HTTPException(status_code=400, detail="World file too large (max 5 MB)")
-    if len(thumb_data) > MAX_THUMB_BYTES:
-        raise HTTPException(status_code=400, detail="Thumbnail too large (max 2 MB)")
+
+    thumb_data = None
+    if req.thumbnail_base64:
+        thumb_data = _decode_base64(req.thumbnail_base64, "thumbnail_base64")
+        if len(thumb_data) > MAX_THUMB_BYTES:
+            raise HTTPException(status_code=400, detail="Thumbnail too large (max 2 MB)")
 
     # verify player exists
     with db() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT 1 FROM players WHERE id = %s;", (player_id,))
+            cur.execute("SELECT 1 FROM players WHERE id = %s;", (req.player_id,))
             if cur.fetchone() is None:
                 raise HTTPException(status_code=404, detail="Player not found")
 
     world_id  = str(uuid.uuid4())
-    world_key = f"worlds/{player_id}/{world_id}.world"
-    thumb_key = f"worlds/{player_id}/{world_id}.png"
-    thumb_url = f"{CDN_BASE}/{thumb_key}"
+    world_key = f"worlds/{req.player_id}/{world_id}.world"
+    thumb_key = f"worlds/{req.player_id}/{world_id}.png" if thumb_data else None
+    thumb_url = f"{CDN_BASE}/{thumb_key}" if thumb_key else None
 
     # upload to Spaces
     client = s3()
@@ -96,10 +111,11 @@ async def upload_world(
         Bucket=SPACES_BUCKET, Key=world_key,
         Body=world_data, ContentType="application/octet-stream", ACL="public-read",
     )
-    client.put_object(
-        Bucket=SPACES_BUCKET, Key=thumb_key,
-        Body=thumb_data, ContentType="image/png", ACL="public-read",
-    )
+    if thumb_data:
+        client.put_object(
+            Bucket=SPACES_BUCKET, Key=thumb_key,
+            Body=thumb_data, ContentType="image/png", ACL="public-read",
+        )
 
     # insert record
     with db() as conn:
@@ -110,7 +126,7 @@ async def upload_world(
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
                 RETURNING id, created_at;
                 """,
-                (world_id, player_id, title, description, world_key, thumb_key, thumb_url),
+                (world_id, req.player_id, title, description, world_key, thumb_key, thumb_url),
             )
             row = cur.fetchone()
 
@@ -199,7 +215,8 @@ def delete_world(world_id: str, player_id: str):
 
     client = s3()
     client.delete_object(Bucket=SPACES_BUCKET, Key=world_key)
-    client.delete_object(Bucket=SPACES_BUCKET, Key=thumb_key)
+    if thumb_key:
+        client.delete_object(Bucket=SPACES_BUCKET, Key=thumb_key)
 
     with db() as conn:
         with conn.cursor() as cur:
