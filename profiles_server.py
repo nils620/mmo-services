@@ -8,6 +8,10 @@ from typing import Optional, List, Literal
 from stream_server import router as stream_router
 from worlds_server import router as worlds_router
 
+from auth import verify_steam_ticket, create_token, get_player_id_optional, dev_router
+
+if dev_router:
+    app.include_router(dev_router, prefix="/auth")
 
 
 # Read from environment (systemd will provide these)
@@ -25,8 +29,9 @@ app.include_router(worlds_router, prefix="/worlds")
 
 
 class LoginRequest(BaseModel):
-    provider: str        # "steam"
-    provider_id: str     # steam64 as string
+    provider: Optional[str] = "steam"
+    provider_id: Optional[str] = None   # legacy just in for backwards compatibility could be removed when Auth is confirmed to work & clients are updated.
+    ticket: Optional[str] = None        # new auth ticket
 
 
 class CreateCharacterRequest(BaseModel):
@@ -74,6 +79,15 @@ def health():
 
 @app.post("/auth/login")
 def auth_login(req: LoginRequest):
+    # New clients send a ticket; old clients still send provider_id directly.
+    # Drop the legacy branch once every client is updated.
+    if req.ticket:
+        provider_id = verify_steam_ticket(req.ticket)
+    elif req.provider_id:
+        provider_id = req.provider_id
+    else:
+        raise HTTPException(status_code=400, detail="ticket is required")
+
     # Upsert player based on provider identity
     with db() as conn:
         with conn.cursor() as cur:
@@ -85,11 +99,14 @@ def auth_login(req: LoginRequest):
                 DO UPDATE SET updated_at = now()
                 RETURNING id;
                 """,
-                (req.provider, req.provider_id),
+                ("steam", provider_id),
             )
             player_id = cur.fetchone()[0]
 
-    return {"player_id": str(player_id)}
+    return {
+        "player_id": str(player_id),
+        "token": create_token(player_id),
+    }
 
 
 @app.post("/characters")
