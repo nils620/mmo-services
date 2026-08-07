@@ -10,10 +10,6 @@ from worlds_server import router as worlds_router
 
 from auth import verify_steam_ticket, create_token, get_player_id_optional, dev_router
 
-if dev_router:
-    app.include_router(dev_router, prefix="/auth")
-
-
 # Read from environment (systemd will provide these)
 DB_DSN = os.environ.get("DB_DSN")
 PORT = int(os.environ.get("PROFILES_PORT", "8000"))
@@ -26,7 +22,8 @@ app = FastAPI()
 app.include_router(stream_router, prefix="/stream")
 app.include_router(worlds_router, prefix="/worlds")
 
-
+if dev_router:
+    app.include_router(dev_router, prefix="/auth")
 
 class LoginRequest(BaseModel):
     provider: Optional[str] = "steam"
