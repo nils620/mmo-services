@@ -1,5 +1,6 @@
 import os
-from fastapi import FastAPI, HTTPException
+import uuid as uuid_lib
+from fastapi import FastAPI, HTTPException, Depends
 from pydantic import BaseModel
 import psycopg
 from typing import Optional, List, Literal
@@ -27,17 +28,17 @@ if dev_router:
 
 class LoginRequest(BaseModel):
     provider: Optional[str] = "steam"
-    provider_id: Optional[str] = None   # legacy just in for backwards compatibility could be removed when Auth is confirmed to work & clients are updated.
+    provider_id: Optional[str] = None   # legacy backwards compatibility Auth is confirmed to work & clients are updated.
     ticket: Optional[str] = None        # new auth ticket
 
 
 class CreateCharacterRequest(BaseModel):
-    player_id: str
+    player_id: Optional[str] = None   # legacy — remove after client cutover
     character_name: str
     customization_id: str
 
 class UpdateCustomizationRequest(BaseModel):
-    player_id: str
+    player_id: Optional[str] = None   # legacy — remove after client cutover
     customization_id: str
 
 
@@ -48,7 +49,7 @@ class ColorRGBA(BaseModel):
     a: float
 
 class UpdateProfileRequest(BaseModel):
-    player_id: str
+    player_id: Optional[str] = None   # legacy backwards compatibility Auth is confirmed to work & clients are updated.
     character_id: str
 
     age: Optional[int] = None
@@ -65,6 +66,33 @@ def clamp01(x: float) -> float:
 
 def db():
     return psycopg.connect(DB_DSN)
+
+
+# ── auth helpers ─────────────────────────────────────────────────────────────
+def _resolve_player(token_player: Optional[str], legacy_player_id: Optional[str]) -> str:
+    """
+    Token wins. Falls back to the client-supplied id until every client is
+    updated. Drop the fallback (and this helper) at cutover.
+    """
+    player_id = token_player or legacy_player_id
+    if not player_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    if not _valid_uuid(player_id):
+        raise HTTPException(status_code=400, detail="Invalid player_id")
+    return player_id
+
+
+def _valid_uuid(value: Optional[str]) -> bool:
+    try:
+        uuid_lib.UUID(str(value))
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
+def _assert_valid_uuid(value: Optional[str], field_name: str):
+    if not _valid_uuid(value):
+        raise HTTPException(status_code=400, detail=f"Invalid {field_name}")
 
 
 @app.get("/health")
@@ -107,7 +135,12 @@ def auth_login(req: LoginRequest):
 
 
 @app.post("/characters")
-def create_character(req: CreateCharacterRequest):
+def create_character(
+    req: CreateCharacterRequest,
+    token_player: Optional[str] = Depends(get_player_id_optional),
+):
+    player_id = _resolve_player(token_player, req.player_id)
+
     name = req.character_name.strip()
     customization_id = (req.customization_id or "").strip()
 
@@ -124,7 +157,7 @@ def create_character(req: CreateCharacterRequest):
 
     with db() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT 1 FROM players WHERE id = %s;", (req.player_id,))
+            cur.execute("SELECT 1 FROM players WHERE id = %s;", (player_id,))
             if cur.fetchone() is None:
                 raise HTTPException(status_code=404, detail="Player not found")
 
@@ -135,7 +168,7 @@ def create_character(req: CreateCharacterRequest):
                     VALUES (%s, %s, %s)
                     RETURNING id, character_name, customization_id;
                     """,
-                    (req.player_id, name, customization_id),
+                    (player_id, name, customization_id),
                 )
                 row = cur.fetchone()
                 if row is None:
@@ -166,7 +199,12 @@ def create_character(req: CreateCharacterRequest):
 
 
 @app.get("/characters")
-def list_characters(player_id: str):
+def list_characters(
+    player_id: Optional[str] = None,   # legacy — remove after client cutover
+    token_player: Optional[str] = Depends(get_player_id_optional),
+):
+    effective_player = _resolve_player(token_player, player_id)
+
     with db() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -176,12 +214,12 @@ def list_characters(player_id: str):
                 WHERE player_id = %s
                 ORDER BY created_at ASC;
                 """,
-                (player_id,),
+                (effective_player,),
             )
             rows = cur.fetchall()
 
     return {
-        "player_id": player_id,
+        "player_id": effective_player,
         "characters": [
             {
                 "character_id": str(r[0]),
@@ -195,7 +233,14 @@ def list_characters(player_id: str):
 
 
 @app.delete("/characters/{character_id}")
-def delete_character(character_id: str, player_id: str):
+def delete_character(
+    character_id: str,
+    player_id: Optional[str] = None,   # legacy — remove after client cutover
+    token_player: Optional[str] = Depends(get_player_id_optional),
+):
+    effective_player = _resolve_player(token_player, player_id)
+    _assert_valid_uuid(character_id, "character_id")
+
     with db() as conn:
         with conn.cursor() as cur:
             # Only delete if this character belongs to this player
@@ -205,7 +250,7 @@ def delete_character(character_id: str, player_id: str):
                 WHERE id = %s AND player_id = %s
                 RETURNING id;
                 """,
-                (character_id, player_id),
+                (character_id, effective_player),
             )
             deleted = cur.fetchone()
 
@@ -217,7 +262,14 @@ def delete_character(character_id: str, player_id: str):
 
 
 @app.put("/characters/{character_id}/customization")
-def update_character_customization_put(character_id: str, req: UpdateCustomizationRequest):
+def update_character_customization_put(
+    character_id: str,
+    req: UpdateCustomizationRequest,
+    token_player: Optional[str] = Depends(get_player_id_optional),
+):
+    player_id = _resolve_player(token_player, req.player_id)
+    _assert_valid_uuid(character_id, "character_id")
+
     customization_id = (req.customization_id or "").strip()
     if not customization_id:
         raise HTTPException(status_code=400, detail="customization_id is empty")
@@ -233,7 +285,7 @@ def update_character_customization_put(character_id: str, req: UpdateCustomizati
                 WHERE id = %s AND player_id = %s
                 RETURNING id, customization_id;
                 """,
-                (customization_id, character_id, req.player_id),
+                (customization_id, character_id, player_id),
             )
             row = cur.fetchone()
 
@@ -246,8 +298,11 @@ def update_character_customization_put(character_id: str, req: UpdateCustomizati
 
 # Profile Fetch & Update
 
+# NOTE: public on purpose — any player can view any profile. No ownership check.
 @app.get("/profiles/{character_id}")
 def get_profile(character_id: str):
+    _assert_valid_uuid(character_id, "character_id")
+
     with db() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -289,7 +344,13 @@ def get_profile(character_id: str):
 
 
 @app.post("/profiles/update")
-def update_profile(req: UpdateProfileRequest):
+def update_profile(
+    req: UpdateProfileRequest,
+    token_player: Optional[str] = Depends(get_player_id_optional),
+):
+    player_id = _resolve_player(token_player, req.player_id)
+    _assert_valid_uuid(req.character_id, "character_id")
+
     interests = (req.interests or "").strip()
     languages = (req.languages or "").strip()
     about_me = (req.about_me or "").strip()
@@ -322,7 +383,7 @@ def update_profile(req: UpdateProfileRequest):
                 FROM characters
                 WHERE id = %s AND player_id = %s;
                 """,
-                (req.character_id, req.player_id),
+                (req.character_id, player_id),
             )
             if cur.fetchone() is None:
                 raise HTTPException(status_code=403, detail="Character not owned by player")
@@ -388,7 +449,7 @@ def update_profile(req: UpdateProfileRequest):
 # Social Requests aka Friends & Friend Requests aswell as blocks
 
 class SocialActionRequest(BaseModel):
-    player_id: str
+    player_id: Optional[str] = None   # legacy — remove after client cutover
     character_id: str          # the actor (must belong to player)
     target_character_id: str   # who we act on
 
@@ -421,15 +482,27 @@ def _is_blocked_either_way(cur, a: str, b: str) -> tuple[bool, bool]:
 def _friends_key(a: str, b: str) -> tuple[str, str]:
     return (a, b) if a < b else (b, a)
 
+
+def _assert_social_uuids(req: SocialActionRequest):
+    _assert_valid_uuid(req.character_id, "character_id")
+    _assert_valid_uuid(req.target_character_id, "target_character_id")
+
+
 @app.post("/friends/request")
-def send_friend_request(req: SocialActionRequest):
+def send_friend_request(
+    req: SocialActionRequest,
+    token_player: Optional[str] = Depends(get_player_id_optional),
+):
+    player_id = _resolve_player(token_player, req.player_id)
+    _assert_social_uuids(req)
+
     a = req.character_id
     b = req.target_character_id
     _assert_not_self(a, b)
 
     with db() as conn:
         with conn.cursor() as cur:
-            _assert_character_owned(cur, a, req.player_id)
+            _assert_character_owned(cur, a, player_id)
 
             a_blocks_b, b_blocks_a = _is_blocked_either_way(cur, a, b)
             if b_blocks_a:
@@ -483,9 +556,19 @@ def send_friend_request(req: SocialActionRequest):
     return {"ok": True, "status": "requested"}
 
 @app.get("/friends/requests/incoming")
-def list_incoming_requests(character_id: str):
+def list_incoming_requests(
+    character_id: str,
+    token_player: Optional[str] = Depends(get_player_id_optional),
+):
+    _assert_valid_uuid(character_id, "character_id")
+
     with db() as conn:
         with conn.cursor() as cur:
+            # Private data — only the owner may read it. Old clients send no
+            # token and are still let through; remove this guard at cutover.
+            if token_player:
+                _assert_character_owned(cur, character_id, token_player)
+
             cur.execute(
                 """
                 SELECT r.from_character_id, c.character_name, r.created_at
@@ -511,9 +594,17 @@ def list_incoming_requests(character_id: str):
     }
 
 @app.get("/friends/requests/outgoing")
-def list_outgoing_requests(character_id: str):
+def list_outgoing_requests(
+    character_id: str,
+    token_player: Optional[str] = Depends(get_player_id_optional),
+):
+    _assert_valid_uuid(character_id, "character_id")
+
     with db() as conn:
         with conn.cursor() as cur:
+            if token_player:
+                _assert_character_owned(cur, character_id, token_player)
+
             cur.execute(
                 """
                 SELECT r.to_character_id, c.character_name, r.created_at
@@ -539,14 +630,20 @@ def list_outgoing_requests(character_id: str):
     }
 
 @app.post("/friends/request/accept")
-def accept_request(req: SocialActionRequest):
+def accept_request(
+    req: SocialActionRequest,
+    token_player: Optional[str] = Depends(get_player_id_optional),
+):
+    player_id = _resolve_player(token_player, req.player_id)
+    _assert_social_uuids(req)
+
     me = req.character_id
     sender = req.target_character_id
     _assert_not_self(me, sender)
 
     with db() as conn:
         with conn.cursor() as cur:
-            _assert_character_owned(cur, me, req.player_id)
+            _assert_character_owned(cur, me, player_id)
 
             # must exist
             cur.execute(
@@ -584,14 +681,20 @@ def accept_request(req: SocialActionRequest):
     return {"ok": True}
 
 @app.post("/friends/request/decline")
-def decline_request(req: SocialActionRequest):
+def decline_request(
+    req: SocialActionRequest,
+    token_player: Optional[str] = Depends(get_player_id_optional),
+):
+    player_id = _resolve_player(token_player, req.player_id)
+    _assert_social_uuids(req)
+
     me = req.character_id
     sender = req.target_character_id
     _assert_not_self(me, sender)
 
     with db() as conn:
         with conn.cursor() as cur:
-            _assert_character_owned(cur, me, req.player_id)
+            _assert_character_owned(cur, me, player_id)
             cur.execute(
                 "DELETE FROM character_friend_requests WHERE from_character_id=%s AND to_character_id=%s;",
                 (sender, me),
@@ -600,9 +703,17 @@ def decline_request(req: SocialActionRequest):
     return {"ok": True}
 
 @app.get("/friends/list")
-def list_friends(character_id: str):
+def list_friends(
+    character_id: str,
+    token_player: Optional[str] = Depends(get_player_id_optional),
+):
+    _assert_valid_uuid(character_id, "character_id")
+
     with db() as conn:
         with conn.cursor() as cur:
+            if token_player:
+                _assert_character_owned(cur, character_id, token_player)
+
             cur.execute(
                 """
                 SELECT
@@ -634,14 +745,20 @@ def list_friends(character_id: str):
     }
 
 @app.post("/friends/remove")
-def remove_friend(req: SocialActionRequest):
+def remove_friend(
+    req: SocialActionRequest,
+    token_player: Optional[str] = Depends(get_player_id_optional),
+):
+    player_id = _resolve_player(token_player, req.player_id)
+    _assert_social_uuids(req)
+
     a = req.character_id
     b = req.target_character_id
     _assert_not_self(a, b)
 
     with db() as conn:
         with conn.cursor() as cur:
-            _assert_character_owned(cur, a, req.player_id)
+            _assert_character_owned(cur, a, player_id)
             ka, kb = _friends_key(a, b)
             cur.execute(
                 "DELETE FROM character_friends WHERE character_a_id=%s AND character_b_id=%s;",
@@ -650,14 +767,20 @@ def remove_friend(req: SocialActionRequest):
     return {"ok": True}
 
 @app.post("/blocks/add")
-def add_block(req: SocialActionRequest):
+def add_block(
+    req: SocialActionRequest,
+    token_player: Optional[str] = Depends(get_player_id_optional),
+):
+    player_id = _resolve_player(token_player, req.player_id)
+    _assert_social_uuids(req)
+
     blocker = req.character_id
     blocked = req.target_character_id
     _assert_not_self(blocker, blocked)
 
     with db() as conn:
         with conn.cursor() as cur:
-            _assert_character_owned(cur, blocker, req.player_id)
+            _assert_character_owned(cur, blocker, player_id)
 
             # add block
             cur.execute(
@@ -689,14 +812,20 @@ def add_block(req: SocialActionRequest):
     return {"ok": True}
 
 @app.post("/blocks/remove")
-def remove_block(req: SocialActionRequest):
+def remove_block(
+    req: SocialActionRequest,
+    token_player: Optional[str] = Depends(get_player_id_optional),
+):
+    player_id = _resolve_player(token_player, req.player_id)
+    _assert_social_uuids(req)
+
     blocker = req.character_id
     blocked = req.target_character_id
     _assert_not_self(blocker, blocked)
 
     with db() as conn:
         with conn.cursor() as cur:
-            _assert_character_owned(cur, blocker, req.player_id)
+            _assert_character_owned(cur, blocker, player_id)
             cur.execute(
                 "DELETE FROM character_blocks WHERE blocker_character_id=%s AND blocked_character_id=%s;",
                 (blocker, blocked),
@@ -704,9 +833,17 @@ def remove_block(req: SocialActionRequest):
     return {"ok": True}
 
 @app.get("/blocks/list")
-def list_blocks(character_id: str):
+def list_blocks(
+    character_id: str,
+    token_player: Optional[str] = Depends(get_player_id_optional),
+):
+    _assert_valid_uuid(character_id, "character_id")
+
     with db() as conn:
         with conn.cursor() as cur:
+            if token_player:
+                _assert_character_owned(cur, character_id, token_player)
+
             cur.execute(
                 """
                 SELECT b.blocked_character_id, c.character_name, b.created_at
