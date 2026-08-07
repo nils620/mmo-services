@@ -1,7 +1,7 @@
 import os
 import time
 from typing import Optional
-
+import hmac
 import httpx
 import jwt  # PyJWT
 from fastapi import APIRouter, Header, HTTPException
@@ -149,21 +149,18 @@ def get_player_id_optional(authorization: str = Header(None)) -> Optional[str]:
     return decode_token(authorization)
 
 
-# ── dev token issuance ───────────────────────────────────────────────────────
-# Router is only created when DEV_AUTH_ENABLED is set, so on prod the route
-# does not exist at all rather than existing-but-guarded.
+DEV_AUTH_SECRET = os.environ.get("DEV_AUTH_SECRET")
+
 dev_router: Optional[APIRouter] = None
 
-if DEV_AUTH_ENABLED:
+if DEV_AUTH_SECRET:
     dev_router = APIRouter()
 
     class DevTokenRequest(BaseModel):
         player_id: str
 
     @dev_router.post("/dev")
-    def dev_token(req: DevTokenRequest):
-        """
-        Mint a token for any player_id with no Steam involvement.
-        Lets you test A-publishes / B-acquires from a single editor session.
-        """
+    def dev_token(req: DevTokenRequest, x_dev_secret: str = Header(None)):
+        if not x_dev_secret or not hmac.compare_digest(x_dev_secret, DEV_AUTH_SECRET):
+            raise HTTPException(status_code=401, detail="Invalid dev secret")
         return {"player_id": req.player_id, "token": create_token(req.player_id)}
