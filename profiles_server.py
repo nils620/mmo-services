@@ -4,6 +4,7 @@ from fastapi import FastAPI, HTTPException, Depends
 from pydantic import BaseModel
 import psycopg
 from typing import Optional, List, Literal
+import httpx
 
 #mounting processes to use same port
 from stream_server import router as stream_router
@@ -14,6 +15,10 @@ from auth import verify_steam_ticket, create_token, get_player_id_optional, dev_
 # Read from environment (systemd will provide these)
 DB_DSN = os.environ.get("DB_DSN")
 PORT = int(os.environ.get("PROFILES_PORT", "8000"))
+
+#Socket Notifications
+NOTIFY_SECRET = os.environ.get("NOTIFY_SECRET")
+CHAT_INTERNAL_URL = os.environ.get("CHAT_INTERNAL_URL", "http://127.0.0.1:4000")
 
 if not DB_DSN:
     raise RuntimeError("DB_DSN is not set. Put it into the systemd Environment/EnvironmentFile.")
@@ -66,6 +71,21 @@ def clamp01(x: float) -> float:
 
 def db():
     return psycopg.connect(DB_DSN)
+
+# ── Socket Notifications ─────────────────────────────────────────────────────
+def notify_character(character_id: str, event_type: str, payload: dict):
+    """Fire-and-forget push. Never let a failed notify break the actual operation."""
+    if not NOTIFY_SECRET:
+        return
+    try:
+        httpx.post(
+            f"{CHAT_INTERNAL_URL}/notify",
+            headers={"X-Notify-Secret": NOTIFY_SECRET},
+            json={"character_id": character_id, "event_type": event_type, "payload": payload},
+            timeout=2.0,
+        )
+    except Exception:
+        pass
 
 
 # ── auth helpers ─────────────────────────────────────────────────────────────
@@ -462,6 +482,20 @@ def _assert_character_owned(cur, character_id: str, player_id: str):
     if cur.fetchone() is None:
         raise HTTPException(status_code=403, detail="Character not owned by player")
 
+def _fetch_character_names(cur, character_ids: list) -> dict:
+    """
+    Returns {character_id: character_name} for the given ids.
+    Used to put display names into notify payloads so the client can render a
+    banner without a second round trip.
+    """
+    if not character_ids:
+        return {}
+    cur.execute(
+        "SELECT id, character_name FROM characters WHERE id = ANY(%s);",
+        (character_ids,),
+    )
+    return {str(row[0]): row[1] for row in cur.fetchall()}
+
 def _assert_not_self(a: str, b: str):
     if a == b:
         raise HTTPException(status_code=400, detail="Cannot target self")
@@ -499,6 +533,9 @@ def send_friend_request(
     a = req.character_id
     b = req.target_character_id
     _assert_not_self(a, b)
+
+    became_friends = False
+    names = {}
 
     with db() as conn:
         with conn.cursor() as cur:
@@ -538,21 +575,41 @@ def send_friend_request(
                     """,
                     (ka, kb),
                 )
-                return {"ok": True, "status": "friends"}
+                became_friends = True
+            else:
+                # normal request
+                try:
+                    cur.execute(
+                        """
+                        INSERT INTO character_friend_requests (from_character_id, to_character_id)
+                        VALUES (%s, %s);
+                        """,
+                        (a, b),
+                    )
+                except Exception:
+                    # if you want specific 409: check existence first (simpler)
+                    raise HTTPException(status_code=409, detail="Request already exists")
 
-            # normal request
-            try:
-                cur.execute(
-                    """
-                    INSERT INTO character_friend_requests (from_character_id, to_character_id)
-                    VALUES (%s, %s);
-                    """,
-                    (a, b),
-                )
-            except Exception:
-                # if you want specific 409: check existence first (simpler)
-                raise HTTPException(status_code=409, detail="Request already exists")
+            # display names for the notify payloads, so the client can render a
+            # banner without a second round trip
+            names = _fetch_character_names(cur, [a, b])
 
+    # Notifications go out after the DB block so the write is committed and the
+    # connection is released before we make an HTTP call.
+    # We never notify the actor (a) — their HTTP response already told them.
+    if became_friends:
+        # b had a pending request out to a; from b's side it just got accepted
+        notify_character(b, "friend_accepted", {
+            "character_id": a,
+            "character_name": names.get(a, ""),
+        })
+        return {"ok": True, "status": "friends"}
+
+    # notify target char that he got a request
+    notify_character(b, "friend_request", {
+        "from_character_id": a,
+        "from_name": names.get(a, ""),
+    })
     return {"ok": True, "status": "requested"}
 
 @app.get("/friends/requests/incoming")
