@@ -608,7 +608,7 @@ def send_friend_request(
     # notify target char that he got a request
     notify_character(b, "friend_request", {
         "from_character_id": a,
-        "from_name": names.get(a, ""),
+        "character_name": names.get(a, ""),
     })
     return {"ok": True, "status": "requested"}
 
@@ -643,7 +643,7 @@ def list_incoming_requests(
         "incoming": [
             {
                 "from_character_id": str(r[0]),
-                "from_name": r[1],
+                "character_name": r[1],
                 "created_at": r[2].isoformat(),
             }
             for r in rows
