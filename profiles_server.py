@@ -521,6 +521,25 @@ def _assert_social_uuids(req: SocialActionRequest):
     _assert_valid_uuid(req.character_id, "character_id")
     _assert_valid_uuid(req.target_character_id, "target_character_id")
 
+def fetch_online_characters(character_ids: list) -> set:
+    """
+    Asks the chat service which of these characters are currently connected.
+    Returns a set of online character_ids. On any failure returns an empty set
+    """
+    if not NOTIFY_SECRET or not character_ids:
+        return set()
+    try:
+        r = httpx.post(
+            f"{CHAT_INTERNAL_URL}/online",
+            headers={"X-Notify-Secret": NOTIFY_SECRET},
+            json={"character_ids": character_ids},
+            timeout=2.0,
+        )
+        if r.status_code != 200:
+            return set()
+        return set(r.json().get("online") or [])
+    except Exception:
+        return set()
 
 @app.post("/friends/request")
 def send_friend_request(
@@ -770,10 +789,11 @@ def decline_request(
 
     return {"ok": True}
 
+
 @app.get("/friends/list")
 def list_friends(
-    character_id: str,
-    token_player: Optional[str] = Depends(get_player_id_optional),
+        character_id: str,
+        token_player: Optional[str] = Depends(get_player_id_optional),
 ):
     _assert_valid_uuid(character_id, "character_id")
 
@@ -804,13 +824,23 @@ def list_friends(
             )
             rows = cur.fetchall()
 
+    friend_ids = [str(r[0]) for r in rows]
+    online_ids = fetch_online_characters(friend_ids)
+
     return {
         "character_id": character_id,
         "friends": [
-            {"character_id": str(r[0]), "character_name": r[1], "since": r[2].isoformat()}
+            {
+                "character_id": str(r[0]),
+                "character_name": r[1],
+                "since": r[2].isoformat(),
+                "online": str(r[0]) in online_ids,
+            }
             for r in rows
         ],
     }
+
+
 
 @app.post("/friends/remove")
 def remove_friend(
@@ -934,3 +964,4 @@ def list_blocks(
             for r in rows
         ],
     }
+
