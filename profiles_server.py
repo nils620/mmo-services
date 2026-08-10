@@ -686,10 +686,11 @@ def list_outgoing_requests(
         ],
     }
 
+
 @app.post("/friends/request/accept")
 def accept_request(
-    req: SocialActionRequest,
-    token_player: Optional[str] = Depends(get_player_id_optional),
+        req: SocialActionRequest,
+        token_player: Optional[str] = Depends(get_player_id_optional),
 ):
     player_id = _resolve_player(token_player, req.player_id)
     _assert_social_uuids(req)
@@ -697,6 +698,8 @@ def accept_request(
     me = req.character_id
     sender = req.target_character_id
     _assert_not_self(me, sender)
+
+    names = {}
 
     with db() as conn:
         with conn.cursor() as cur:
@@ -735,12 +738,19 @@ def accept_request(
                 (a, b),
             )
 
+            names = _fetch_character_names(cur, [me])
+    notify_character(sender, "friend_accepted", {
+        "character_id": me,
+        "character_name": names.get(me, ""),
+    })
+
     return {"ok": True}
+
 
 @app.post("/friends/request/decline")
 def decline_request(
-    req: SocialActionRequest,
-    token_player: Optional[str] = Depends(get_player_id_optional),
+        req: SocialActionRequest,
+        token_player: Optional[str] = Depends(get_player_id_optional),
 ):
     player_id = _resolve_player(token_player, req.player_id)
     _assert_social_uuids(req)
@@ -756,6 +766,7 @@ def decline_request(
                 "DELETE FROM character_friend_requests WHERE from_character_id=%s AND to_character_id=%s;",
                 (sender, me),
             )
+    notify_character(sender, "friendlist_update", {})
 
     return {"ok": True}
 
@@ -821,6 +832,8 @@ def remove_friend(
                 "DELETE FROM character_friends WHERE character_a_id=%s AND character_b_id=%s;",
                 (ka, kb),
             )
+    notify_character(b, "friendlist_update", {})
+
     return {"ok": True}
 
 @app.post("/blocks/add")
@@ -865,6 +878,7 @@ def add_block(
                 """,
                 (blocker, blocked, blocked, blocker),
             )
+    notify_character(blocked, "friendlist_update", {})
 
     return {"ok": True}
 
