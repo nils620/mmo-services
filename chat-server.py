@@ -323,6 +323,32 @@ async def health(request):
 app.router.add_get("/health", health)
 
 
+#   POST /online used to handle friends online status
+#   Header: X-Notify-Secret: <shared secret>
+#   Body:   {"character_ids": ["...", "..."]}
+#   Returns {"online": ["...", ...]}  — the subset that is currently connected
+async def online(request):
+    if not NOTIFY_SECRET:
+        return web.json_response({"error": "notify not configured"}, status=503)
+
+    provided = request.headers.get("X-Notify-Secret") or ""
+    if not hmac.compare_digest(provided, NOTIFY_SECRET):
+        return web.json_response({"error": "invalid secret"}, status=401)
+
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid json"}, status=400)
+
+    character_ids = data.get("character_ids") or []
+    if not isinstance(character_ids, list):
+        return web.json_response({"error": "character_ids must be a list"}, status=400)
+
+    online_ids = [cid for cid in character_ids if cid in character_to_sid]
+    return web.json_response({"online": online_ids})
+
+
+app.router.add_post("/online", online)
 
 # Start the server
 if __name__ == '__main__':
