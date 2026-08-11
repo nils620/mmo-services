@@ -46,6 +46,11 @@ class UpdateCustomizationRequest(BaseModel):
     player_id: Optional[str] = None   # legacy — remove after client cutover
     customization_id: str
 
+class TransferRequest(BaseModel):
+    player_id: Optional[str] = None   # legacy — remove after client cutover
+    character_id: str                 # sender, must belong to the caller
+    target_character_id: str          # recipient
+    amount: int
 
 class ColorRGBA(BaseModel):
     r: float
@@ -206,10 +211,26 @@ def create_character(
                     (character_id,),
                 )
 
+                # one-time welcome grant, account level
+                cur.execute(
+                    """
+                    UPDATE players
+                    SET starting_grant_given = true
+                    WHERE id = %s AND starting_grant_given = false
+                    RETURNING id;
+                    """,
+                    (player_id,),
+                )
+                if cur.fetchone() is not None:
+                    _move_money(
+                        cur, None, character_id,
+                        STARTING_GRANT, REASON_STARTING_GRANT,
+                    )
+
             except psycopg.errors.UniqueViolation:
                 # optional but clean: reset transaction state if you ever continue using conn
                 conn.rollback()
-                raise HTTPException(status_code=409, detail="Character name already used by this player")
+                raise HTTPException(status_code=409, detail="Character name already taken")
 
     return {
         "character_id": str(character_id),
@@ -220,8 +241,8 @@ def create_character(
 
 @app.get("/characters")
 def list_characters(
-    player_id: Optional[str] = None,   # legacy — remove after client cutover
-    token_player: Optional[str] = Depends(get_player_id_optional),
+        player_id: Optional[str] = None,  # legacy — remove after client cutover
+        token_player: Optional[str] = Depends(get_player_id_optional),
 ):
     effective_player = _resolve_player(token_player, player_id)
 
@@ -229,7 +250,7 @@ def list_characters(
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, character_name, customization_id, created_at
+                SELECT id, character_name, customization_id, created_at, balance
                 FROM characters
                 WHERE player_id = %s
                 ORDER BY created_at ASC;
@@ -246,6 +267,7 @@ def list_characters(
                 "character_name": r[1],
                 "customization_id": (r[2] or ""),  # allow fallback
                 "created_at": r[3].isoformat(),
+                "balance": int(r[4]),
             }
             for r in rows
         ],
@@ -254,31 +276,43 @@ def list_characters(
 
 @app.delete("/characters/{character_id}")
 def delete_character(
-    character_id: str,
-    player_id: Optional[str] = None,   # legacy — remove after client cutover
-    token_player: Optional[str] = Depends(get_player_id_optional),
+        character_id: str,
+        player_id: Optional[str] = None,  # legacy — remove after client cutover
+        token_player: Optional[str] = Depends(get_player_id_optional),
 ):
     effective_player = _resolve_player(token_player, player_id)
     _assert_valid_uuid(character_id, "character_id")
 
     with db() as conn:
         with conn.cursor() as cur:
-            # Only delete if this character belongs to this player
+            # ownership check first, so we never burn someone else's balance
             cur.execute(
-                """
-                DELETE FROM characters
-                WHERE id = %s AND player_id = %s
-                RETURNING id;
-                """,
+                "SELECT balance FROM characters WHERE id = %s AND player_id = %s;",
+                (character_id, effective_player),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="Character not found for this player")
+
+            balance = int(row[0])
+            if balance > 0:
+                # burn it — the ledger keeps the record even though the
+                # character row is about to disappear
+                _move_money(
+                    cur, character_id, None,
+                    balance, REASON_CHARACTER_DELETED,
+                )
+
+            cur.execute(
+                "DELETE FROM characters WHERE id = %s AND player_id = %s RETURNING id;",
                 (character_id, effective_player),
             )
             deleted = cur.fetchone()
 
     if deleted is None:
-        # either doesn't exist or not owned by that player
         raise HTTPException(status_code=404, detail="Character not found for this player")
 
-    return {"ok": True, "character_id": character_id}
+    return {"ok": True, "character_id": character_id, "burned": balance}
 
 
 @app.put("/characters/{character_id}/customization")
@@ -965,3 +999,208 @@ def list_blocks(
         ],
     }
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+# profiles_server.py — transaction system
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ── config ───────────────────────────────────────────────────────────────────
+STARTING_GRANT = 2500
+MIN_TRANSFER = 1
+HISTORY_PAGE_SIZE = 50
+HISTORY_MAX_PAGE_SIZE = 100
+
+# reason values in use. Extend freely — this is a TEXT column, not a pg enum,
+# so adding one is a code change rather than a migration.
+REASON_STARTING_GRANT = "starting_grant"
+REASON_TRANSFER = "transfer"
+REASON_CHARACTER_DELETED = "character_deleted"
+
+
+# ── the one money primitive ──────────────────────────────────────────────────
+def _move_money(
+        cur,
+        from_character_id: Optional[str],
+        to_character_id: Optional[str],
+        amount: int,
+        reason: str,
+        reference_id: Optional[str] = None,
+):
+    """
+    The single place money moves. Every path calls this — transfers, grants,
+    purchases, presence pay later.
+
+    from_character_id None -> minted into existence (grant, salary)
+    to_character_id   None -> burned out of existence (purchase, delete)
+
+    Must be called inside an existing cursor/transaction so the balance updates
+    and the ledger row commit together or not at all.
+
+    Raises HTTPException(409) if the sender cannot cover it.
+    """
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be positive")
+
+    if from_character_id:
+        # Conditional UPDATE rather than SELECT-then-UPDATE: the balance check
+        # and the debit are one atomic statement, so two concurrent transfers
+        # cannot both pass the check.
+        cur.execute(
+            """
+            UPDATE characters
+            SET balance = balance - %s
+            WHERE id = %s AND balance >= %s
+            RETURNING balance;
+            """,
+            (amount, from_character_id, amount),
+        )
+        if cur.fetchone() is None:
+            raise HTTPException(status_code=409, detail="Insufficient funds")
+
+    if to_character_id:
+        cur.execute(
+            "UPDATE characters SET balance = balance + %s WHERE id = %s RETURNING balance;",
+            (amount, to_character_id),
+        )
+        if cur.fetchone() is None:
+            raise HTTPException(status_code=404, detail="Recipient character not found")
+
+    cur.execute(
+        """
+        INSERT INTO transactions
+            (from_character_id, to_character_id, amount, reason, reference_id)
+        VALUES (%s, %s, %s, %s, %s);
+        """,
+        (from_character_id, to_character_id, amount, reason, reference_id),
+    )
+
+
+def _get_balance(cur, character_id: str) -> int:
+    cur.execute("SELECT balance FROM characters WHERE id = %s;", (character_id,))
+    row = cur.fetchone()
+    return int(row[0]) if row else 0
+
+
+# ── transfer endpoint ────────────────────────────────────────────────────────
+@app.post("/transfer")
+def transfer_money(
+        req: TransferRequest,
+        token_player: Optional[str] = Depends(get_player_id_optional),
+):
+    player_id = _resolve_player(token_player, req.player_id)
+    _assert_valid_uuid(req.character_id, "character_id")
+    _assert_valid_uuid(req.target_character_id, "target_character_id")
+
+    if req.amount < MIN_TRANSFER:
+        raise HTTPException(status_code=400, detail=f"Minimum transfer is {MIN_TRANSFER}")
+
+    sender = req.character_id
+    recipient = req.target_character_id
+
+    if sender == recipient:
+        raise HTTPException(status_code=400, detail="Cannot transfer to the same character")
+
+    names = {}
+    new_balance = 0
+
+    with db() as conn:
+        with conn.cursor() as cur:
+            _assert_character_owned(cur, sender, player_id)
+
+            # A block in either direction stops the transfer. Sending money to
+            # someone who blocked you is still contact.
+            sender_blocks, recipient_blocks = _is_blocked_either_way(cur, sender, recipient)
+            if recipient_blocks:
+                raise HTTPException(status_code=403, detail="You are blocked by this character")
+            if sender_blocks:
+                raise HTTPException(status_code=409, detail="Unblock this character first")
+
+            _move_money(cur, sender, recipient, req.amount, REASON_TRANSFER)
+
+            new_balance = _get_balance(cur, sender)
+            names = _fetch_character_names(cur, [sender])
+
+    notify_character(recipient, "transaction_received", {
+        "amount": req.amount,
+        "from_character_id": sender,
+        "from_name": names.get(sender, ""),
+        "reason": REASON_TRANSFER,
+    })
+
+    return {
+        "ok": True,
+        "amount": req.amount,
+        "balance": new_balance,
+    }
+
+
+# ── history ──────────────────────────────────────────────────────────────────
+@app.get("/transactions")
+def list_transactions(
+        character_id: str,
+        limit: int = HISTORY_PAGE_SIZE,
+        offset: int = 0,
+        token_player: Optional[str] = Depends(get_player_id_optional),
+):
+    _assert_valid_uuid(character_id, "character_id")
+    limit = max(1, min(int(limit), HISTORY_MAX_PAGE_SIZE))
+    offset = max(0, int(offset))
+
+    with db() as conn:
+        with conn.cursor() as cur:
+            # Private data — only the owner sees their ledger.
+            if token_player:
+                _assert_character_owned(cur, character_id, token_player)
+
+            cur.execute(
+                """
+                SELECT
+                    t.id,
+                    t.amount,
+                    t.reason,
+                    t.reference_id,
+                    t.created_at,
+                    (t.to_character_id = %s) AS incoming,
+                    CASE
+                        WHEN t.to_character_id = %s THEN t.from_character_id
+                        ELSE t.to_character_id
+                    END AS other_id,
+                    CASE
+                        WHEN t.to_character_id = %s THEN cf.character_name
+                        ELSE ct.character_name
+                    END AS other_name
+                FROM transactions t
+                LEFT JOIN characters cf ON cf.id = t.from_character_id
+                LEFT JOIN characters ct ON ct.id = t.to_character_id
+                WHERE t.from_character_id = %s OR t.to_character_id = %s
+                ORDER BY t.created_at DESC
+                LIMIT %s OFFSET %s;
+                """,
+                (character_id, character_id, character_id,
+                 character_id, character_id, limit, offset),
+            )
+            rows = cur.fetchall()
+
+            balance = _get_balance(cur, character_id)
+
+    return {
+        "character_id": character_id,
+        "balance": balance,
+        "limit": limit,
+        "offset": offset,
+        "transactions": [
+            {
+                "transaction_id": str(r[0]),
+                "amount": int(r[1]),
+                "reason": r[2],
+                "reference_id": str(r[3]) if r[3] else "",
+                "created_at": r[4].isoformat(),
+                "incoming": bool(r[5]),
+                # empty when the counterparty is the system (grant, burn) or a
+                # character that has since been deleted
+                "other_character_id": str(r[6]) if r[6] else "",
+                "other_character_name": r[7] or "",
+            }
+            for r in rows
+        ],
+    }
