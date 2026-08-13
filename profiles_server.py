@@ -33,16 +33,7 @@ from worlds_server import router as worlds_router
 
 from auth import verify_steam_ticket, create_token, get_player_id_optional, dev_router
 
-# Read from environment (systemd will provide these)
-DB_DSN = os.environ.get("DB_DSN")
 PORT = int(os.environ.get("PROFILES_PORT", "8000"))
-
-#Socket Notifications
-NOTIFY_SECRET = os.environ.get("NOTIFY_SECRET")
-CHAT_INTERNAL_URL = os.environ.get("CHAT_INTERNAL_URL", "http://127.0.0.1:4000")
-
-if not DB_DSN:
-    raise RuntimeError("DB_DSN is not set. Put it into the systemd Environment/EnvironmentFile.")
 
 app = FastAPI()
 #mounting processes to use same port
@@ -95,24 +86,6 @@ class UpdateProfileRequest(BaseModel):
 def clamp01(x: float) -> float:
     return max(0.0, min(1.0, float(x)))
 
-def db():
-    return psycopg.connect(DB_DSN)
-
-# ── Socket Notifications ─────────────────────────────────────────────────────
-def notify_character(character_id: str, event_type: str, payload: dict):
-    """Fire-and-forget push. Never let a failed notify break the actual operation."""
-    if not NOTIFY_SECRET:
-        return
-    try:
-        httpx.post(
-            f"{CHAT_INTERNAL_URL}/notify",
-            headers={"X-Notify-Secret": NOTIFY_SECRET},
-            json={"character_id": character_id, "event_type": event_type, "payload": payload},
-            timeout=2.0,
-        )
-    except Exception:
-        pass
-
 
 # ── auth helpers ─────────────────────────────────────────────────────────────
 def _resolve_player(token_player: Optional[str], legacy_player_id: Optional[str]) -> str:
@@ -126,19 +99,6 @@ def _resolve_player(token_player: Optional[str], legacy_player_id: Optional[str]
     if not _valid_uuid(player_id):
         raise HTTPException(status_code=400, detail="Invalid player_id")
     return player_id
-
-
-def _valid_uuid(value: Optional[str]) -> bool:
-    try:
-        uuid_lib.UUID(str(value))
-        return True
-    except (ValueError, AttributeError, TypeError):
-        return False
-
-
-def _assert_valid_uuid(value: Optional[str], field_name: str):
-    if not _valid_uuid(value):
-        raise HTTPException(status_code=400, detail=f"Invalid {field_name}")
 
 
 @app.get("/health")
@@ -533,28 +493,6 @@ class SocialActionRequest(BaseModel):
     target_character_id: str   # who we act on
 
 
-def _assert_character_owned(cur, character_id: str, player_id: str):
-    cur.execute(
-        "SELECT 1 FROM characters WHERE id=%s AND player_id=%s;",
-        (character_id, player_id),
-    )
-    if cur.fetchone() is None:
-        raise HTTPException(status_code=403, detail="Character not owned by player")
-
-def _fetch_character_names(cur, character_ids: list) -> dict:
-    """
-    Returns {character_id: character_name} for the given ids.
-    Used to put display names into notify payloads so the client can render a
-    banner without a second round trip.
-    """
-    if not character_ids:
-        return {}
-    cur.execute(
-        "SELECT id, character_name FROM characters WHERE id = ANY(%s);",
-        (character_ids,),
-    )
-    return {str(row[0]): row[1] for row in cur.fetchall()}
-
 def _assert_not_self(a: str, b: str):
     if a == b:
         raise HTTPException(status_code=400, detail="Cannot target self")
@@ -580,25 +518,6 @@ def _assert_social_uuids(req: SocialActionRequest):
     _assert_valid_uuid(req.character_id, "character_id")
     _assert_valid_uuid(req.target_character_id, "target_character_id")
 
-def fetch_online_characters(character_ids: list) -> set:
-    """
-    Asks the chat service which of these characters are currently connected.
-    Returns a set of online character_ids. On any failure returns an empty set
-    """
-    if not NOTIFY_SECRET or not character_ids:
-        return set()
-    try:
-        r = httpx.post(
-            f"{CHAT_INTERNAL_URL}/online",
-            headers={"X-Notify-Secret": NOTIFY_SECRET},
-            json={"character_ids": character_ids},
-            timeout=2.0,
-        )
-        if r.status_code != 200:
-            return set()
-        return set(r.json().get("online") or [])
-    except Exception:
-        return set()
 
 @app.post("/friends/request")
 def send_friend_request(
@@ -1026,85 +945,8 @@ def list_blocks(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# profiles_server.py — transaction system
+# profiles_server.py — transactions
 # ═══════════════════════════════════════════════════════════════════════════
-
-# ── config ───────────────────────────────────────────────────────────────────
-STARTING_GRANT = 2500
-MIN_TRANSFER = 1
-HISTORY_PAGE_SIZE = 50
-HISTORY_MAX_PAGE_SIZE = 100
-
-# reason values in use. Extend freely — this is a TEXT column, not a pg enum,
-# so adding one is a code change rather than a migration.
-REASON_STARTING_GRANT = "starting_grant"
-REASON_TRANSFER = "transfer"
-REASON_CHARACTER_DELETED = "character_deleted"
-
-
-# ── the one money primitive ──────────────────────────────────────────────────
-def _move_money(
-        cur,
-        from_character_id: Optional[str],
-        to_character_id: Optional[str],
-        amount: int,
-        reason: str,
-        reference_id: Optional[str] = None,
-):
-    """
-    The single place money moves. Every path calls this — transfers, grants,
-    purchases, presence pay later.
-
-    from_character_id None -> minted into existence (grant, salary)
-    to_character_id   None -> burned out of existence (purchase, delete)
-
-    Must be called inside an existing cursor/transaction so the balance updates
-    and the ledger row commit together or not at all.
-
-    Raises HTTPException(409) if the sender cannot cover it.
-    """
-    if amount <= 0:
-        raise HTTPException(status_code=400, detail="Amount must be positive")
-
-    if from_character_id:
-        # Conditional UPDATE rather than SELECT-then-UPDATE: the balance check
-        # and the debit are one atomic statement, so two concurrent transfers
-        # cannot both pass the check.
-        cur.execute(
-            """
-            UPDATE characters
-            SET balance = balance - %s
-            WHERE id = %s AND balance >= %s
-            RETURNING balance;
-            """,
-            (amount, from_character_id, amount),
-        )
-        if cur.fetchone() is None:
-            raise HTTPException(status_code=409, detail="Insufficient funds")
-
-    if to_character_id:
-        cur.execute(
-            "UPDATE characters SET balance = balance + %s WHERE id = %s RETURNING balance;",
-            (amount, to_character_id),
-        )
-        if cur.fetchone() is None:
-            raise HTTPException(status_code=404, detail="Recipient character not found")
-
-    cur.execute(
-        """
-        INSERT INTO transactions
-            (from_character_id, to_character_id, amount, reason, reference_id)
-        VALUES (%s, %s, %s, %s, %s);
-        """,
-        (from_character_id, to_character_id, amount, reason, reference_id),
-    )
-
-
-def _get_balance(cur, character_id: str) -> int:
-    cur.execute("SELECT balance FROM characters WHERE id = %s;", (character_id,))
-    row = cur.fetchone()
-    return int(row[0]) if row else 0
-
 
 # ── transfer endpoint ────────────────────────────────────────────────────────
 @app.post("/transfer")
