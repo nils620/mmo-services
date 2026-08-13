@@ -5,7 +5,28 @@ from pydantic import BaseModel
 import psycopg
 from typing import Optional, List, Literal
 import httpx
-
+from common import (
+    db,
+    _valid_uuid,
+    _assert_valid_uuid,
+    _assert_character_owned,
+    _fetch_character_names,
+    notify_character,
+    fetch_online_characters,
+    NOTIFY_SECRET,
+    CHAT_INTERNAL_URL,
+)
+from economy import (
+    _move_money,
+    _get_balance,
+    STARTING_GRANT,
+    MIN_TRANSFER,
+    HISTORY_PAGE_SIZE,
+    HISTORY_MAX_PAGE_SIZE,
+    REASON_STARTING_GRANT,
+    REASON_TRANSFER,
+    REASON_CHARACTER_DELETED,
+)
 #mounting processes to use same port
 from stream_server import router as stream_router
 from worlds_server import router as worlds_router
@@ -302,7 +323,11 @@ def delete_character(
                     cur, character_id, None,
                     balance, REASON_CHARACTER_DELETED,
                 )
-
+            cur.execute(
+                "UPDATE worlds SET status='takendown', featured_rank=NULL, updated_at=now() "
+                "WHERE character_id = %s AND status = 'ready';",
+                (character_id,),
+            )
             cur.execute(
                 "DELETE FROM characters WHERE id = %s AND player_id = %s RETURNING id;",
                 (character_id, effective_player),
