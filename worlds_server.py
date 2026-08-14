@@ -980,6 +980,7 @@ def download_world(world_id: str, player_id: str = Depends(get_player_id)):
         "world_id": world_id,
         "version": w["version"],
         "url": _presign(w["world_key"]),
+        "thumbnail_url": _cdn(w["card_key"]),
         "expires_in": PRESIGN_SECONDS,
         "asset_manifest": w["asset_manifest"],
     }
