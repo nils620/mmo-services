@@ -139,6 +139,10 @@ def _presign(key: str) -> str:
         ExpiresIn=PRESIGN_SECONDS,
     )
 
+def _image_keys(world_id: str) -> tuple[str, str]:
+    stamp = uuid.uuid4().hex[:12]
+    return (f"worlds/{world_id}/img_{stamp}_card.jpg",
+            f"worlds/{world_id}/img_{stamp}_full.jpg")
 
 # ── row mapping ──────────────────────────────────────────────────────────────
 # psycopg here returns tuples, matching profiles_server and the economy
@@ -387,17 +391,14 @@ class UploadWorldRequest(BaseModel):
 
 
 class UpdateWorldRequest(BaseModel):
-    world_data: str
+    # omit world_data for a metadata-only edit — no version bump, so other
+    # players don't see a spurious "update available" after a rename
+    world_data: Optional[str] = None
     thumbnail_base64: Optional[str] = None
     title: Optional[str] = Field(default=None, min_length=1, max_length=64)
     description: Optional[str] = Field(default=None, max_length=500)
-
-
-class PatchWorldRequest(BaseModel):
-    title: Optional[str] = Field(default=None, min_length=1, max_length=64)
-    description: Optional[str] = Field(default=None, max_length=500)
     price: Optional[int] = Field(default=None, ge=0, le=100_000_000)
-    character_id: Optional[str] = None    # repoint the credited author
+    character_id: Optional[str] = None
 
 
 class PurchaseRequest(BaseModel):
@@ -700,54 +701,89 @@ def update_world(
 ):
     _assert_valid_uuid(world_id, "world_id")
 
-    world_bytes = req.world_data.encode("utf-8")
-    if not world_bytes:
-        raise HTTPException(400, "world_data is empty")
-    if len(world_bytes) > MAX_WORLD_BYTES:
-        raise HTTPException(400, "World file too large")
-
-    manifest = _extract_manifest(req.world_data)
+    has_new_save = req.world_data is not None
+    world_bytes = manifest = None
+    if has_new_save:
+        world_bytes = req.world_data.encode("utf-8")
+        if not world_bytes:
+            raise HTTPException(400, "world_data is empty")
+        if len(world_bytes) > MAX_WORLD_BYTES:
+            raise HTTPException(400, "World file too large")
+        manifest = _extract_manifest(req.world_data)
 
     card_bytes = full_bytes = None
     if req.thumbnail_base64:
         card_bytes, full_bytes = _process_thumbnail(req.thumbnail_base64)
 
+    # ── phase 1: validate, reserve a version only if the save changed ────────
     with db() as conn:
         with conn.cursor() as cur:
-            _rate_limit(cur, player_id)
+            if has_new_save:
+                _rate_limit(cur, player_id)
+
             w = _fetch_world(cur, world_id, for_update=True)
             if str(w["player_id"]) != player_id:
                 raise HTTPException(403, "Not your world")
             if w["status"] == "deleted":
                 raise HTTPException(404, "World not found")
 
-            new_version = w["version"] + 1
-            prev_card, prev_full = w["card_key"], w["full_key"]
-            cur.execute(
-                "UPDATE worlds SET version=%s, status='pending' WHERE id=%s;",
-                (new_version, world_id),
-            )
+            prior_status = w["status"]
+            new_version = w["version"] + (1 if has_new_save else 0)
 
-    wkey = _world_key(world_id, new_version)
-    new_ckey = _card_key(world_id, new_version) if card_bytes else None
-    new_fkey = _full_key(world_id, new_version) if full_bytes else None
-    _put_objects(world_bytes, card_bytes, full_bytes, wkey, new_ckey, new_fkey)
+            # price floor before any Spaces work, so a rejection costs nothing
+            if req.price is not None and w["root_world_id"]:
+                cur.execute("SELECT price FROM worlds WHERE id=%s;", (w["root_world_id"],))
+                r = cur.fetchone()
+                floor = math.ceil(int(r[0]) * DERIVATIVE_MARKUP) if r else 0
+                if req.price < floor:
+                    raise HTTPException(400, f"Price must be at least {floor} credits")
 
-    # keep the old thumbnail when the client didn't send a new one
-    ckey = new_ckey or prev_card
-    fkey = new_fkey or prev_full
+            if req.character_id is not None:
+                _assert_valid_uuid(req.character_id, "character_id")
+                _assert_character_owned(cur, req.character_id, player_id)
 
+            if has_new_save:
+                cur.execute(
+                    "UPDATE worlds SET version=%s, status='pending' WHERE id=%s;",
+                    (new_version, world_id),
+                )
+
+    # ── phase 2: Spaces ──────────────────────────────────────────────────────
+    wkey = _world_key(world_id, new_version) if has_new_save else w["world_key"]
+    if card_bytes:
+        ckey, fkey = _image_keys(world_id)
+    else:
+        ckey, fkey = w["card_key"], w["full_key"]
+
+    if has_new_save or card_bytes:
+        _put_objects(
+            world_bytes, card_bytes, full_bytes,
+            wkey if has_new_save else None,
+            ckey if card_bytes else None,
+            fkey if full_bytes else None,
+        )
+
+    # ── phase 3: commit ──────────────────────────────────────────────────────
     with db() as conn:
         with conn.cursor() as cur:
-            sets = ["status='ready'", "world_key=%s", "card_key=%s", "full_key=%s",
-                    "asset_manifest=%s", "updated_at=now()"]
-            params: list = [wkey, ckey, fkey, json.dumps(manifest)]
+            sets, params = ["updated_at=now()"], []
+            if has_new_save:
+                # restore the PRIOR status, not 'ready' — updating a taken-down
+                # world must not silently relist it past the slot check
+                sets += ["status=%s", "world_key=%s", "asset_manifest=%s"]
+                params += [prior_status, wkey, json.dumps(manifest)]
+            if card_bytes:
+                sets += ["card_key=%s", "full_key=%s"]
+                params += [ckey, fkey]
             if req.title is not None:
-                sets.append("title=%s")
-                params.append(req.title.strip())
+                sets.append("title=%s"); params.append(req.title.strip())
             if req.description is not None:
-                sets.append("description=%s")
-                params.append(req.description.strip())
+                sets.append("description=%s"); params.append(req.description.strip())
+            if req.price is not None:
+                sets.append("price=%s"); params.append(req.price)
+            if req.character_id is not None:
+                sets.append("character_id=%s"); params.append(req.character_id)
+
             params.append(world_id)
             cur.execute(
                 f"UPDATE worlds SET {', '.join(sets)} WHERE id=%s RETURNING updated_at;",
@@ -759,66 +795,11 @@ def update_world(
         "ok": True,
         "world_id": world_id,
         "version": new_version,
+        "version_bumped": has_new_save,
         "thumbnail_url": _cdn(ckey),
-        "asset_manifest": manifest,
+        "asset_manifest": manifest if has_new_save else w["asset_manifest"],
         "updated_at": updated_at.isoformat(),
     }
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# PATCH — metadata only, no new version
-# ═════════════════════════════════════════════════════════════════════════════
-@router.patch("/{world_id}")
-def patch_world(
-    world_id: str,
-    req: PatchWorldRequest,
-    player_id: str = Depends(get_player_id),
-):
-    _assert_valid_uuid(world_id, "world_id")
-
-    with db() as conn:
-        with conn.cursor() as cur:
-            w = _fetch_world(cur, world_id, for_update=True)
-            if str(w["player_id"]) != player_id:
-                raise HTTPException(403, "Not your world")
-            if w["status"] == "deleted":
-                raise HTTPException(404, "World not found")
-
-            sets, params = [], []
-
-            if req.title is not None:
-                sets.append("title=%s")
-                params.append(req.title.strip())
-            if req.description is not None:
-                sets.append("description=%s")
-                params.append(req.description.strip())
-
-            if req.character_id is not None:
-                _assert_valid_uuid(req.character_id, "character_id")
-                _assert_character_owned(cur, req.character_id, player_id)
-                sets.append("character_id=%s")
-                params.append(req.character_id)
-
-            if req.price is not None:
-                # a derivative can't be repriced below its floor either
-                if w["root_world_id"]:
-                    cur.execute("SELECT price FROM worlds WHERE id=%s;", (w["root_world_id"],))
-                    r = cur.fetchone()
-                    floor = math.ceil(int(r[0]) * DERIVATIVE_MARKUP) if r else 0
-                    if req.price < floor:
-                        raise HTTPException(400, f"Price must be at least {floor} credits")
-                sets.append("price=%s")
-                params.append(req.price)
-
-            if not sets:
-                raise HTTPException(400, "Nothing to update")
-
-            sets.append("updated_at=now()")
-            params.append(world_id)
-            cur.execute(f"UPDATE worlds SET {', '.join(sets)} WHERE id=%s;", params)
-
-    return {"ok": True, "world_id": world_id}
-
 
 # ═════════════════════════════════════════════════════════════════════════════
 # PURCHASE
@@ -924,7 +905,7 @@ def purchase_world(
             )
 
             new_balance = _get_balance(cur, req.character_id)
-            names = _fetch_character_names(cur, [req.character_id])
+            names = _fetch_character_names(cur, [req.character_id, seller_character_id])
             title = w["title"]
 
     # ── notify after commit ──────────────────────────────────────────────────
@@ -945,7 +926,7 @@ def purchase_world(
             "world_title": title,
             "amount": author_cut,
             "from_character_id": seller_character_id,
-            "from_name": "",
+            "from_name": names.get(seller_character_id, ""),
             "reason": REASON_WORLD_ROYALTY,
         })
 
