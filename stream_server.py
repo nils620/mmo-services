@@ -141,7 +141,7 @@ async def resolve(req: ResolveRequest):
     except Exception as e:
         err = str(e)
         if 'Sign in to confirm' in err or 'bot' in err.lower():
-            raise HTTPException(status_code=403, detail="YOUTUBE BOT DETECTION, try a different video")
+            raise HTTPException(status_code=403, detail="YOUTUBE BOT DETECTION, try a different video or Twitch")
         if 'Private video' in err:
             raise HTTPException(status_code=403, detail="VIDEO is PRIVATE")
         if 'unavailable' in err.lower():
