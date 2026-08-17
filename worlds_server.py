@@ -73,9 +73,7 @@ MAX_IMAGE_EDGE = 4096
 ASPECT_TOLERANCE = 0.02
 
 CARD_SIZE = (640, 360)
-FULL_SIZE = (1280, 720)
-CARD_QUALITY = 80
-FULL_QUALITY = 85
+CARD_QUALITY = 85
 
 MAX_LISTED_WORLDS = 50                      # per player, status='ready'
 MAX_UPLOADS_PER_HR = 20
@@ -123,11 +121,6 @@ def _world_key(world_id: str, version: int) -> str:
 def _card_key(world_id: str, version: int) -> str:
     return f"worlds/{world_id}/v{version}_card.jpg"
 
-
-def _full_key(world_id: str, version: int) -> str:
-    return f"worlds/{world_id}/v{version}_full.jpg"
-
-
 def _cdn(key: Optional[str]) -> Optional[str]:
     return f"{CDN_BASE}/{key}" if key else None
 
@@ -139,10 +132,8 @@ def _presign(key: str) -> str:
         ExpiresIn=PRESIGN_SECONDS,
     )
 
-def _image_keys(world_id: str) -> tuple[str, str]:
-    stamp = uuid.uuid4().hex[:12]
-    return (f"worlds/{world_id}/img_{stamp}_card.jpg",
-            f"worlds/{world_id}/img_{stamp}_full.jpg")
+def _image_keys(world_id: str) -> str:
+    return f"worlds/{world_id}/img_{uuid.uuid4().hex[:12]}_card.jpg"
 
 # ── row mapping ──────────────────────────────────────────────────────────────
 # psycopg here returns tuples, matching profiles_server and the economy
@@ -150,14 +141,14 @@ def _image_keys(world_id: str) -> tuple[str, str]:
 # order can't drift out from under an index.
 WORLD_COLS = """
     w.id, w.player_id, w.character_id, w.title, w.description, w.version,
-    w.status, w.world_key, w.card_key, w.full_key, w.price,
+    w.status, w.world_key, w.card_key, w.price,
     w.allow_derivatives, w.parent_world_id, w.root_world_id,
     w.asset_manifest, w.download_count, w.featured_rank, w.moderation_flag,
     w.created_at, w.updated_at
 """
 WORLD_FIELDS = [
     "id", "player_id", "character_id", "title", "description", "version",
-    "status", "world_key", "card_key", "full_key", "price",
+    "status", "world_key", "card_key", "price",
     "allow_derivatives", "parent_world_id", "root_world_id",
     "asset_manifest", "download_count", "featured_rank", "moderation_flag",
     "created_at", "updated_at",
@@ -249,7 +240,7 @@ def _extract_manifest(world_data: str) -> dict:
 
 
 # ── image pipeline ───────────────────────────────────────────────────────────
-def _process_thumbnail(b64: str) -> tuple[bytes, bytes]:
+def _process_thumbnail(b64: str) -> bytes:
     """
     Validate and RE-ENCODE an uploaded screenshot.
 
@@ -290,12 +281,12 @@ def _process_thumbnail(b64: str) -> tuple[bytes, bytes]:
 
     def encode(size, quality) -> bytes:
         buf = io.BytesIO()
-        img.resize(size, Image.LANCZOS).save(
-            buf, format="JPEG", quality=quality, optimize=True
+        img.resize(CARD_SIZE, Image.LANCZOS).save(
+            buf, format="JPEG", quality=CARD_QUALITY, optimize=True
         )
         return buf.getvalue()
 
-    return encode(CARD_SIZE, CARD_QUALITY), encode(FULL_SIZE, FULL_QUALITY)
+    return encode(CARD_SIZE, CARD_QUALITY)
 
 
 # ── db helpers ───────────────────────────────────────────────────────────────
@@ -347,19 +338,19 @@ def _rate_limit(cur, player_id: str):
         raise HTTPException(429, "Too many uploads, try again later")
 
 
-def _put_objects(world_bytes, card_bytes, full_bytes, wkey, ckey, fkey):
+def _put_objects(world_bytes, card_bytes, wkey, ckey):
     client = s3()
-    client.put_object(
-        Bucket=SPACES_BUCKET, Key=wkey, Body=world_bytes,
-        ContentType="application/json", ACL="private",
-    )
-    for body, key in ((card_bytes, ckey), (full_bytes, fkey)):
-        if body and key:
-            client.put_object(
-                Bucket=SPACES_BUCKET, Key=key, Body=body,
-                ContentType="image/jpeg", ACL="public-read",
-                CacheControl="public, max-age=31536000, immutable",
-            )
+    if world_bytes and wkey:
+        client.put_object(
+            Bucket=SPACES_BUCKET, Key=wkey, Body=world_bytes,
+            ContentType="application/json", ACL="private",
+        )
+    if card_bytes and ckey:
+        client.put_object(
+            Bucket=SPACES_BUCKET, Key=ckey, Body=card_bytes,
+            ContentType="image/jpeg", ACL="public-read",
+            CacheControl="public, max-age=31536000, immutable",
+        )
 
 
 def _purge_prefix(prefix: str):
@@ -561,7 +552,6 @@ def world_detail(world_id: str, player_id: str = Depends(get_player_id)):
     detail = _card(w)
     detail.update({
         "description": w["description"] or "",
-        "full_image_url": _cdn(w["full_key"]),
         "asset_manifest": w["asset_manifest"],
         "root_world_id": str(w["root_world_id"]) if w["root_world_id"] else "",
         "root_author_name": root_name or "",
@@ -597,9 +587,9 @@ def upload_world(req: UploadWorldRequest, player_id: str = Depends(get_player_id
 
     manifest = _extract_manifest(req.world_data)
 
-    card_bytes = full_bytes = None
+    card_bytes =  None
     if req.thumbnail_base64:
-        card_bytes, full_bytes = _process_thumbnail(req.thumbnail_base64)
+        card_bytes = _process_thumbnail(req.thumbnail_base64)
 
     world_id = str(uuid.uuid4())
     price = req.price
@@ -661,8 +651,7 @@ def upload_world(req: UploadWorldRequest, player_id: str = Depends(get_player_id
     # ── phase 2: Spaces, outside the transaction, row already reserved ───────
     wkey = _world_key(world_id, 1)
     ckey = _card_key(world_id, 1) if card_bytes else None
-    fkey = _full_key(world_id, 1) if full_bytes else None
-    _put_objects(world_bytes, card_bytes, full_bytes, wkey, ckey, fkey)
+    _put_objects(world_bytes, card_bytes, wkey, ckey )
 
     # ── phase 3: publish ─────────────────────────────────────────────────────
     with db() as conn:
@@ -670,12 +659,12 @@ def upload_world(req: UploadWorldRequest, player_id: str = Depends(get_player_id
             cur.execute(
                 """
                 UPDATE worlds
-                SET status='ready', world_key=%s, card_key=%s, full_key=%s,
+                SET status='ready', world_key=%s, card_key=%s,
                     updated_at=now()
                 WHERE id = %s
                 RETURNING created_at, updated_at;
                 """,
-                (wkey, ckey, fkey, world_id),
+                (wkey, ckey, world_id),
             )
             created_at, updated_at = cur.fetchone()
 
@@ -711,9 +700,9 @@ def update_world(
             raise HTTPException(400, "World file too large")
         manifest = _extract_manifest(req.world_data)
 
-    card_bytes = full_bytes = None
+    card_bytes = None
     if req.thumbnail_base64:
-        card_bytes, full_bytes = _process_thumbnail(req.thumbnail_base64)
+        card_bytes = _process_thumbnail(req.thumbnail_base64)
 
     # ── phase 1: validate, reserve a version only if the save changed ────────
     with db() as conn:
@@ -751,19 +740,19 @@ def update_world(
     # ── phase 2: Spaces ──────────────────────────────────────────────────────
     wkey = _world_key(world_id, new_version) if has_new_save else w["world_key"]
     if card_bytes:
-        ckey, fkey = _image_keys(world_id)
+        ckey = _image_keys(world_id)
     else:
-        ckey, fkey = w["card_key"], w["full_key"]
+        ckey = w["card_key"]
 
     if has_new_save or card_bytes:
         _put_objects(
-            world_bytes, card_bytes, full_bytes,
+            world_bytes if has_new_save else None,
+            card_bytes,
             wkey if has_new_save else None,
             ckey if card_bytes else None,
-            fkey if full_bytes else None,
         )
 
-    # ── phase 3: commit ──────────────────────────────────────────────────────
+    # ── phase 3: commit ─────────────────────────────────────────────────────
     with db() as conn:
         with conn.cursor() as cur:
             sets, params = ["updated_at=now()"], []
@@ -773,8 +762,8 @@ def update_world(
                 sets += ["status=%s", "world_key=%s", "asset_manifest=%s"]
                 params += [prior_status, wkey, json.dumps(manifest)]
             if card_bytes:
-                sets += ["card_key=%s", "full_key=%s"]
-                params += [ckey, fkey]
+                sets += ["card_key=%s"]
+                params += [ckey]
             if req.title is not None:
                 sets.append("title=%s"); params.append(req.title.strip())
             if req.description is not None:
@@ -1048,7 +1037,7 @@ def delete_world(world_id: str, player_id: str = Depends(get_player_id)):
                 raise HTTPException(403, "Not your world")
             cur.execute(
                 "UPDATE worlds SET status='deleted', featured_rank=NULL, "
-                "world_key=NULL, card_key=NULL, full_key=NULL, updated_at=now() "
+                "world_key=NULL, card_key=NULL, updated_at=now() "
                 "WHERE id=%s;",
                 (world_id,),
             )
