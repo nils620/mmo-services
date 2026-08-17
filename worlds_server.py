@@ -752,7 +752,7 @@ def update_world(
             ckey if card_bytes else None,
         )
 
-    # ── phase 3: commit ──────────────────────────────────────────────────────
+    # ── phase 3: commit ─────────────────────────────────────────────────────
     with db() as conn:
         with conn.cursor() as cur:
             sets, params = ["updated_at=now()"], []
