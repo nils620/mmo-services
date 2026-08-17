@@ -572,8 +572,11 @@ def world_detail(world_id: str, player_id: str = Depends(get_player_id)):
 @router.post("/upload")
 def upload_world(req: UploadWorldRequest, player_id: str = Depends(get_player_id)):
     _assert_valid_uuid(req.character_id, "character_id")
-    if req.parent_world_id:
-        _assert_valid_uuid(req.parent_world_id, "parent_world_id")
+    # VaRest sends "" rather than omitting optional fields, and "" is not a
+    # valid uuid — normalise to None before it reaches Postgres
+    parent_world_id = (req.parent_world_id or "").strip() or None
+    if parent_world_id:
+        _assert_valid_uuid(parent_world_id, "parent_world_id")
 
     title = req.title.strip()
     if not title:
@@ -603,8 +606,8 @@ def upload_world(req: UploadWorldRequest, player_id: str = Depends(get_player_id
             _rate_limit(cur, player_id)
             _assert_listing_slot(cur, player_id)
 
-            if req.parent_world_id:
-                parent = _fetch_world(cur, req.parent_world_id)
+            if parent_world_id:
+                parent = _fetch_world(cur, parent_world_id)
                 if parent["status"] == "deleted":
                     raise HTTPException(404, "Parent world not found")
                 if not parent["allow_derivatives"]:
@@ -645,7 +648,7 @@ def upload_world(req: UploadWorldRequest, player_id: str = Depends(get_player_id
                 """,
                 (world_id, player_id, req.character_id, title,
                  req.description.strip(), price, allow_derivatives,
-                 req.parent_world_id, root_id, json.dumps(manifest)),
+                 parent_world_id, root_id, json.dumps(manifest)),
             )
 
     # ── phase 2: Spaces, outside the transaction, row already reserved ───────
