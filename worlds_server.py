@@ -165,6 +165,7 @@ def _card(w: dict) -> dict:
     return {
         "world_id": str(w["id"]),
         "title": w["title"],
+        "description": w["description"] or "",
         "author_character_id": str(w["character_id"]) if w["character_id"] else "",
         "author_name": w.get("author_name") or "",
         "thumbnail_url": _cdn(w["card_key"]),
@@ -279,14 +280,11 @@ def _process_thumbnail(b64: str) -> bytes:
     except Exception:
         raise HTTPException(400, "Thumbnail could not be decoded")
 
-    def encode(size, quality) -> bytes:
-        buf = io.BytesIO()
-        img.resize(CARD_SIZE, Image.LANCZOS).save(
-            buf, format="JPEG", quality=CARD_QUALITY, optimize=True
-        )
-        return buf.getvalue()
-
-    return encode(CARD_SIZE, CARD_QUALITY)
+    buf = io.BytesIO()
+    img.resize(CARD_SIZE, Image.LANCZOS).save(
+        buf, format="JPEG", quality=CARD_QUALITY, optimize=True
+    )
+    return buf.getvalue()
 
 
 # ── db helpers ───────────────────────────────────────────────────────────────
@@ -410,11 +408,6 @@ def browse_worlds(
     page: int = Query(1, ge=1),
     player_id: str = Depends(get_player_id),
 ):
-    """
-    One endpoint behind every community tab. The UI switches `sort`, not the
-    endpoint. Offset pagination is fine at this catalogue size — keyset is the
-    upgrade when the table gets big enough to notice.
-    """
     offset = (page - 1) * PAGE_SIZE
     where = ["w.status = 'ready'", "w.moderation_flag IS DISTINCT FROM 'hidden'"]
     params: list = []
@@ -438,22 +431,54 @@ def browse_worlds(
 
     with db() as conn:
         with conn.cursor() as cur:
+            # world_purchases is unique on (world_id, buyer_player_id), so the
+            # join can't multiply rows
             cur.execute(
                 f"""
-                SELECT {WORLD_COLS}, c.character_name
+                SELECT {WORLD_COLS},
+                       c.character_name,
+                       rc.character_name,
+                       rw.price,
+                       (wp.world_id IS NOT NULL)
                 FROM worlds w
                 LEFT JOIN characters c ON c.id = w.character_id
+                LEFT JOIN worlds rw ON rw.id = w.root_world_id
+                LEFT JOIN characters rc ON rc.id = rw.character_id
+                LEFT JOIN world_purchases wp
+                  ON wp.world_id = w.id AND wp.buyer_player_id = %s
                 WHERE {where_sql}
                 ORDER BY {order}
                 LIMIT %s OFFSET %s;
                 """,
-                (*params, PAGE_SIZE, offset),
+                (player_id, *params, PAGE_SIZE, offset),
             )
             rows = cur.fetchall()
             cur.execute(f"SELECT COUNT(*) FROM worlds w WHERE {where_sql};", tuple(params))
             total = cur.fetchone()[0]
 
-    worlds = [_card(_world(r, ("author_name",))) for r in rows]
+    extra = ("author_name", "root_author_name", "root_price", "purchased")
+    worlds = []
+    for r in rows:
+        w = _world(r, extra)
+        item = _card(w)
+
+        is_author = str(w["player_id"]) == player_id
+        # a non-derivative is its own root, so the floor is against its price
+        root_price = int(w["root_price"]) if w["root_price"] is not None else int(w["price"])
+
+        item.update({
+            "asset_manifest": w["asset_manifest"],
+            "root_world_id": str(w["root_world_id"]) if w["root_world_id"] else "",
+            "root_author_name": w["root_author_name"] or "",
+            "parent_world_id": str(w["parent_world_id"]) if w["parent_world_id"] else "",
+            "status": w["status"],
+            "owned": is_author or int(w["price"]) == 0 or bool(w["purchased"]),
+            "is_author": is_author,
+            "created_at": w["created_at"].isoformat(),
+            "derivative_price_floor": math.ceil(root_price * DERIVATIVE_MARKUP),
+        })
+        worlds.append(item)
+
     return {
         "page": page,
         "page_size": PAGE_SIZE,
